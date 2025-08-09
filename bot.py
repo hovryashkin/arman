@@ -3,10 +3,10 @@ import telebot
 from flask import Flask, request
 
 # Настройки
-TOKEN = os.environ.get("TELEGRAM_TOKEN")  # Токен бота (установи в Render в Environment Variables)
+TOKEN = os.environ.get("TOKEN")  # Токен бота (установи в Render в Environment Variables)
 APP_URL = os.environ.get("APP_URL")  # https://твой-проект.onrender.com
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
+bot = telebot.TeleBot(TOKEN)
 server = Flask(__name__)
 
 # Обработчик команды /start
