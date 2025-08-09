@@ -1,43 +1,72 @@
 import os
 import telebot
-from flask import Flask, request
+import openai
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import random
 
-# Настройки
-TOKEN = os.environ.get("TOKEN")  # Токен бота (установи в Render в Environment Variables)
-APP_URL = os.environ.get("APP_URL")  # https://твой-проект.onrender.com
+# Настройки токенов из переменных окружения
+TOKEN = os.environ.get("TELEGRAM_TOKEN")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
 bot = telebot.TeleBot(TOKEN)
-server = Flask(__name__)
+openai.api_key = OPENAI_API_KEY
 
-# Обработчик команды /start
-@bot.message_handler(commands=['start'])
-def start_message(message):
-    bot.send_message(message.chat.id, "Привет! Я бот, который всегда онлайн на Render 😊")
+# --- Настройка Google Sheets ---
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds_json = os.environ.get("GOOGLE_SHEETS_CREDS")  # JSON ключ как строка
+if creds_json:
+    import json
+    creds_dict = json.loads(creds_json)
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    client = gspread.authorize(creds)
+    sheet = client.open("Ответы бота").sheet1
+else:
+    sheet = None
 
-# Обработчик текстовых сообщений
-@bot.message_handler(func=lambda m: True)
-def echo_all(message):
-    bot.send_message(message.chat.id, f"Ты написал: {message.text}")
+# --- Функция генерации вопроса через GPT ---
+def generate_question():
+    prompt = "Сгенерируй один интересный вопрос для пользователя по любым темам."
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "system", "content": prompt}]
+    )
+    return response.choices[0].message["content"]
 
-# Webhook маршрут
-@server.route(f"/webhook/{TOKEN}", methods=['POST'])
+# --- Логика бота ---
+@bot.message_handler(commands=["start"])
+def start(message):
+    question = generate_question()
+    bot.send_message(message.chat.id, f"Привет! Вот твой вопрос:\n\n{question}")
+
+@bot.message_handler(func=lambda msg: True)
+def handle_answer(message):
+    user_answer = message.text
+
+    # Сохраняем ответ в Google Таблицу
+    if sheet:
+        sheet.append_row([message.from_user.username or "", user_answer])
+
+    # Отправляем следующий вопрос
+    next_question = generate_question()
+    bot.send_message(message.chat.id, f"Спасибо за ответ!\n\nСледующий вопрос:\n{next_question}")
+
+# Flask для Webhook
+from flask import Flask, request
+app = Flask(__name__)
+
+@app.route(f"/webhook/{TOKEN}", methods=["POST"])
 def webhook():
-    json_str = request.get_data().decode('UTF-8')
+    json_str = request.get_data().decode("UTF-8")
     update = telebot.types.Update.de_json(json_str)
     bot.process_new_updates([update])
-    return "ok", 200
+    return "OK", 200
 
-# Главная страница (для проверки)
-@server.route("/")
-def index():
+@app.route("/")
+def home():
     return "Бот работает!", 200
 
 if __name__ == "__main__":
-    # Ставим webhook при запуске
-    bot.remove_webhook()
-    bot.set_webhook(url=f"{APP_URL}/webhook/{TOKEN}")
-
-    # Flask слушает порт Render
-    port = int(os.environ.get("PORT", 5000))
-    server.run(host="0.0.0.0", port=port)
-
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
