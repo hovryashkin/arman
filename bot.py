@@ -1,72 +1,65 @@
-
 import os
+import requests
 import telebot
-import gspread
-from datetime import datetime
-from openai import OpenAI
 from flask import Flask, request
 
-# === Переменные окружения ===
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 APP_URL = os.getenv("APP_URL")  # https://твой-проект.onrender.com
-CREDENTIALS_PATH = "/etc/secrets/credentials.json"
-SPREADSHEET_NAME = "Zarina Answers"
 
-# === Инициализация бота и API ===
-bot = telebot.TeleBot(BOT_TOKEN)
-client = OpenAI(api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1")
+bot = telebot.TeleBot(TOKEN)
+server = Flask(__name__)
 
-# Подключаем Google Sheets
-gc = gspread.service_account(filename=CREDENTIALS_PATH)
-sheet = gc.open(SPREADSHEET_NAME).sheet1
-
-# Flask-приложение для webhook
-app = Flask(__name__)
-
-# Сохраняем последний вопрос для каждого пользователя
-last_question = {}
-
-# Функция генерации вопроса через ИИ
+# ===== AI функция через OpenRouter =====
 def get_ai_question():
-    prompt = "Задай один короткий и личный вопрос на русском языке девушке."
-    response = client.chat.completions.create(
-        model="mistralai/mistral-7b-instruct",
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return response.choices[0].message.content.strip()
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "mistralai/mistral-7b-instruct",
+        "messages": [
+            {"role": "user", "content": "Задай один короткий и дружелюбный вопрос на русском языке для собеседника."}
+        ]
+    }
+    r = requests.post(url, headers=headers, json=payload, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+    return data["choices"][0]["message"]["content"].strip()
 
-# Команда /question — прислать вопрос
-@bot.message_handler(commands=["question"])
-def ask_question(message):
-    q = get_ai_question()
-    last_question[message.chat.id] = q
-    bot.send_message(message.chat.id, q)
+# ===== Команда /start =====
+@bot.message_handler(commands=['start'])
+def start(message):
+    bot.send_message(message.chat.id, "Привет! Я буду задавать тебе вопросы 🤖")
+    ask_question(message.chat.id)
 
-# Обработка ответа на вопрос
-@bot.message_handler(func=lambda m: m.chat.id in last_question)
-def save_answer(message):
-    question = last_question.pop(message.chat.id)
-    answer = message.text
-    sheet.append_row([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), question, answer])
-    bot.send_message(message.chat.id, "Ответ записан! ✅")
+# ===== Задаем вопрос =====
+def ask_question(chat_id):
+    try:
+        question = get_ai_question()
+        bot.send_message(chat_id, question)
+    except Exception as e:
+        bot.send_message(chat_id, f"Ошибка при генерации вопроса: {e}")
 
-# Маршрут для получения обновлений от Telegram
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+# ===== Ответ на текст =====
+@bot.message_handler(func=lambda message: True)
+def handle_answer(message):
+    # Тут позже можно добавить отправку в Google Таблицу
+    bot.send_message(message.chat.id, "Спасибо за ответ! Вот еще вопрос:")
+    ask_question(message.chat.id)
+
+# ===== Webhook =====
+@server.route('/' + TOKEN, methods=['POST'])
+def getMessage():
+    bot.process_new_updates([telebot.types.Update.de_json(request.stream.read().decode("utf-8"))])
+    return "!", 200
+
+@server.route("/")
 def webhook():
-    update = telebot.types.Update.de_json(request.stream.read().decode("utf-8"))
-    bot.process_new_updates([update])
-    return "OK", 200
-
-# Главная страница (для проверки)
-@app.route("/", methods=["GET"])
-def index():
-    return "Бот работает!", 200
+    bot.remove_webhook()
+    bot.set_webhook(url=APP_URL + TOKEN)
+    return "!", 200
 
 if __name__ == "__main__":
-    import requests
-    # Убираем старый webhook и ставим новый
-    bot.remove_webhook()
-    bot.set_webhook(url=f"{APP_URL}/{BOT_TOKEN}")
-    # Запускаем Flask-сервер
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    server.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)))
