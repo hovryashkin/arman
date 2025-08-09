@@ -1,14 +1,17 @@
+
 import os
 import telebot
 import gspread
 from datetime import datetime
 from openai import OpenAI
+from flask import Flask, request
 
 # === Настройки ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 CREDENTIALS_PATH = "/etc/secrets/credentials.json"
 SPREADSHEET_NAME = "Zarina Answers"
+APP_URL = os.getenv("APP_URL")  # например, https://my-bot.onrender.com
 
 bot = telebot.TeleBot(BOT_TOKEN)
 client = OpenAI(api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1")
@@ -16,6 +19,9 @@ client = OpenAI(api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/
 # Подключаем Google Sheets
 gc = gspread.service_account(filename=CREDENTIALS_PATH)
 sheet = gc.open(SPREADSHEET_NAME).sheet1
+
+# Flask-приложение
+app = Flask(__name__)
 
 # Храним последний вопрос для каждого пользователя
 last_question = {}
@@ -44,6 +50,23 @@ def save_answer(message):
     sheet.append_row([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), question, answer])
     bot.send_message(message.chat.id, "Ответ записан! ✅")
 
-# Запуск бота
+# Маршрут для Telegram
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+def receive_update():
+    json_str = request.get_data().decode("UTF-8")
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return "!", 200
+
+# Главная страница
+@app.route("/", methods=["GET"])
+def index():
+    return "Бот работает!", 200
+
 if __name__ == "__main__":
-    bot.polling(none_stop=True)
+    import requests
+    # Устанавливаем webhook при старте
+    bot.remove_webhook()
+    bot.set_webhook(url=f"{APP_URL}/{BOT_TOKEN}")
+    # Запускаем Flask
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
