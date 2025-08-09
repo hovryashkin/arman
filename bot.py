@@ -2,7 +2,7 @@ import os
 import telebot
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import requests
+from transformers import pipeline
 
 # === Настройки ===
 TOKEN = os.getenv("BOT_TOKEN")
@@ -15,29 +15,15 @@ creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope
 client = gspread.authorize(creds)
 sheet = client.open("Zarina Answers").sheet1
 
+# === Авторизация Hugging Face ===
+generator = pipeline(
+    "text-generation",
+    model="gpt2",
+    use_auth_token=HF_TOKEN
+)
+
 # === Telegram Bot ===
 bot = telebot.TeleBot(TOKEN)
-
-HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3"
-HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
-
-def generate_question():
-    prompt = "Придумай один интересный вопрос для девушки."
-    response = requests.post(
-        HF_API_URL,
-        headers=HEADERS,
-        json={"inputs": prompt}
-    )
-    if response.status_code == 200:
-        result = response.json()
-        if isinstance(result, list) and "generated_text" in result[0]:
-            return result[0]["generated_text"]
-        elif isinstance(result, dict) and "generated_text" in result:
-            return result["generated_text"]
-        else:
-            return "Не удалось сгенерировать вопрос."
-    else:
-        return f"Ошибка API: {response.status_code}"
 
 @bot.message_handler(commands=["start"])
 def start(message):
@@ -45,7 +31,9 @@ def start(message):
     ask_ai_question(message.chat.id)
 
 def ask_ai_question(chat_id):
-    question = generate_question()
+    prompt = "Придумай один интересный вопрос для девушки."
+    completion = generator(prompt, max_length=50, num_return_sequences=1)
+    question = completion[0]["generated_text"].strip()
     bot.send_message(chat_id, question)
     sheet.append_row([chat_id, question, "вопрос"])
 
