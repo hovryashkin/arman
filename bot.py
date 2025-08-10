@@ -3,7 +3,7 @@ import telebot
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import requests
-import json
+from flask import Flask, request
 
 # === Настройки ===
 TOKEN = os.getenv("BOT_TOKEN")
@@ -19,16 +19,8 @@ sheet = client.open("Zarina Answers").sheet1
 # === Telegram Bot ===
 bot = telebot.TeleBot(TOKEN)
 
-# Многострочный промт с описанием, какие вопросы задаёт ИИ
-system_message = (
-    "Задавай только один вопрос без лишних слов."
-    "Ты — доброжелательный и понимающий парень, который задаёт девушке по имени Зарина вопрос, чтобы лучше узнать её. "
-    "Вопросы должны быть разнообразными — о семье, интересах, с юмором, философские и душевные. "
-    "Зарина — человек с биополярным расстройством, поэтому твой вопрос должны быть лёгким, поддерживающим, "
-    "чтобы немного поднимать ей настроение, дарить позитив и тепло. "
-    "Задавай вопросы так, чтобы Зарина чувствовала себя комфортно и интересно, избегай тяжёлых или тревожных тем."
-    
-)
+# Словарь для хранения последнего вопроса для каждого пользователя
+last_questions = {}
 
 def ask_openrouter_question():
     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -39,7 +31,8 @@ def ask_openrouter_question():
     data = {
         "model": "mistralai/mistral-7b-instruct",
         "messages": [
-            {"role": "system", "content": system_message}
+            {"role": "system", "content": "Ты — доброжелательный и понимающий собеседник, который задаёт девушке по имени Зарина по одному вопросу за раз. Вопросы должны быть на разные темы: семья, творчество, интересы, с юмором, философские и душевные. Зарина — моя девушка, у неё биополярное расстройство, поэтому вопросы должны быть лёгкими, поддерживающими и позитивными, чтобы поднимать настроение. Не задавай несколько вопросов сразу, только один вопрос. Не давай объяснений, просто сформулируй короткий и интересный вопрос.
+."}
         ],
         "max_tokens": 100,
         "temperature": 0.7,
@@ -60,36 +53,29 @@ def ask_ai_question(chat_id):
     try:
         question = ask_openrouter_question()
         bot.send_message(chat_id, question)
-        # Сохраняем в таблицу вопрос с пустым ответом (пока ответ не получен)
-        sheet.append_row([chat_id, question, ""])
+        sheet.append_row([chat_id, question, "вопрос"])
+        last_questions[chat_id] = question  # Сохраняем вопрос для пользователя
     except Exception as e:
-        bot.send_message(chat_id, f"Ошибка: {str(e)}")
+        bot.send_message(chat_id, f"Ошибка при получении вопроса от ИИ: {str(e)}")
 
 @bot.message_handler(func=lambda m: True)
 def handle_answer(message):
-    # Получаем последний вопрос из таблицы, чтобы связать с ответом
-    records = sheet.get_all_records()
-    last_question = ""
-    for row in reversed(records):
-        if row["Ответ"] == "":
-            last_question = row["Вопрос"]
-            break
-    # Записываем ответ вместе с вопросом
-    sheet.append_row([message.chat.id, last_question, message.text])
+    question = last_questions.get(message.chat.id, "Вопрос неизвестен")
+    answer = message.text
+    sheet.append_row([message.chat.id, question, answer])  # Записываем пару вопрос-ответ
     bot.send_message(message.chat.id, "Ответ записан! Вот следующий вопрос:")
     ask_ai_question(message.chat.id)
 
 # === Flask Webhook ===
+app = Flask(__name__)
+
+@app.route(f"/webhook/{TOKEN}", methods=["POST"])
+def webhook():
+    json_str = request.get_data().decode("UTF-8")
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return "OK", 200
+
 if __name__ == "__main__":
-    from flask import Flask, request
-    app = Flask(__name__)
-
-    @app.route(f"/webhook/{TOKEN}", methods=["POST"])
-    def webhook():
-        json_str = request.get_data().decode("UTF-8")
-        update = telebot.types.Update.de_json(json_str)
-        bot.process_new_updates([update])
-        return "OK", 200
-
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
