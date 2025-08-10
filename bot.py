@@ -1,15 +1,15 @@
 import os
 import telebot
 import gspread
-import requests
 from oauth2client.service_account import ServiceAccountCredentials
-from flask import Flask, request
+import requests
+import time
 
 # === Настройки ===
 TOKEN = os.getenv("BOT_TOKEN")
-HF_API_KEY = os.getenv("HF_API_KEY")  # токен Hugging Face
+HF_API_TOKEN = os.getenv("HF_API_TOKEN")
 CREDENTIALS_FILE = "/etc/secrets/credentials.json"
-MODEL_ID = "gpt2"  # можно поменять на другую модель
+HF_MODEL = "gpt2"  # Заменяй на нужную модель Hugging Face
 
 # === Авторизация Google Sheets ===
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -20,27 +20,50 @@ sheet = client.open("Zarina Answers").sheet1
 # === Telegram Bot ===
 bot = telebot.TeleBot(TOKEN)
 
-# Функция для запроса к Hugging Face
-def hf_generate(prompt):
-    headers = {"Authorization": f"Bearer {HF_API_KEY}"}
-    payload = {"inputs": prompt, "parameters": {"max_new_tokens": 50}}
-    response = requests.post(f"https://api-inference.huggingface.co/models/{MODEL_ID}", 
-                             headers=headers, json=payload)
-    result = response.json()
-    if isinstance(result, dict) and "error" in result:
-        return "Ошибка: модель ещё загружается, попробуйте позже."
-    return result[0]["generated_text"]
+headers = {
+    "Authorization": f"Bearer {HF_API_TOKEN}",
+    "Content-Type": "application/json"
+}
+
+def ask_ai_question(chat_id):
+    prompt = "Придумай один интересный вопрос для викторины."
+
+    data = {
+        "inputs": prompt,
+        "options": {"wait_for_model": True}
+    }
+
+    try:
+        response = requests.post(
+            f"https://api-inference.huggingface.co/models/{HF_MODEL}",
+            headers=headers,
+            json=data
+        )
+
+        if response.status_code == 503:
+            # Модель ещё загружается — подождать и повторить
+            time.sleep(3)
+            return ask_ai_question(chat_id)
+
+        if response.status_code != 200:
+            bot.send_message(chat_id, "Ошибка при получении вопроса от ИИ.")
+            return
+
+        output = response.json()
+        if isinstance(output, dict) and output.get("error"):
+            bot.send_message(chat_id, "Ошибка модели: " + output["error"])
+            return
+
+        question = output[0]["generated_text"] if isinstance(output, list) else str(output)
+        bot.send_message(chat_id, question)
+        sheet.append_row([chat_id, question, "вопрос"])
+    except Exception as e:
+        bot.send_message(chat_id, "Произошла ошибка: " + str(e))
 
 @bot.message_handler(commands=["start"])
 def start(message):
     bot.send_message(message.chat.id, "Привет! Я буду задавать тебе вопросы.")
     ask_ai_question(message.chat.id)
-
-def ask_ai_question(chat_id):
-    prompt = "Придумай один интересный вопрос для викторины."
-    question = hf_generate(prompt)
-    bot.send_message(chat_id, question)
-    sheet.append_row([chat_id, question, "вопрос"])
 
 @bot.message_handler(func=lambda m: True)
 def handle_answer(message):
@@ -49,15 +72,16 @@ def handle_answer(message):
     ask_ai_question(message.chat.id)
 
 # === Flask Webhook ===
-app = Flask(__name__)
-
-@app.route(f"/webhook/{TOKEN}", methods=["POST"])
-def webhook():
-    json_str = request.get_data().decode("UTF-8")
-    update = telebot.types.Update.de_json(json_str)
-    bot.process_new_updates([update])
-    return "OK", 200
-
 if __name__ == "__main__":
+    from flask import Flask, request
+    app = Flask(__name__)
+
+    @app.route(f"/webhook/{TOKEN}", methods=["POST"])
+    def webhook():
+        json_str = request.get_data().decode("UTF-8")
+        update = telebot.types.Update.de_json(json_str)
+        bot.process_new_updates([update])
+        return "OK", 200
+
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
