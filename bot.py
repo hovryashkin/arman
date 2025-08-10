@@ -3,7 +3,6 @@ import telebot
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import requests
-import json
 
 # === Настройки ===
 TOKEN = os.getenv("BOT_TOKEN")
@@ -35,7 +34,12 @@ def ask_openrouter_question():
         "top_p": 0.95
     }
     response = requests.post(url, headers=headers, json=data)
+
+    print("OpenRouter status:", response.status_code)
+    print("OpenRouter response:", response.text)
+
     response.raise_for_status()
+
     result = response.json()
     question = result["choices"][0]["message"]["content"]
     return question
@@ -51,7 +55,7 @@ def ask_ai_question(chat_id):
         bot.send_message(chat_id, question)
         sheet.append_row([chat_id, question, "вопрос"])
     except Exception as e:
-        bot.send_message(chat_id, f"Ошибка: {str(e)}")
+        bot.send_message(chat_id, f"Ошибка при получении вопроса от ИИ: {str(e)}")
 
 @bot.message_handler(func=lambda m: True)
 def handle_answer(message):
