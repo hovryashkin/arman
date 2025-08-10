@@ -27,7 +27,7 @@ def ask_openrouter_question():
     data = {
         "model": "mistralai/mistral-7b-instruct",
         "messages": [
-            {"role": "system", "content": "Придумай один интересный вопрос для викторины."}
+            {"role": "system", "content": "Придумай один интересный вопрос для девушки по имени Зарина. Вопрос должен быть на русском языке и грамматически правильно составлен.."}
         ],
         "max_tokens": 100,
         "temperature": 0.7,
