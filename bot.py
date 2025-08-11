@@ -32,8 +32,8 @@ def ask_openrouter_question():
         "model": "mistralai/mistral-7b-instruct",
         "messages": [
             {"role": "system", "content": 
-        "Ты — доброжелательный и понимающий собеседник, который мотвирует девушку по имени Зарина."
-        "Мотивируй ее на активные действия"
+        "Ты — доброжелательный и понимающий собеседник, который мотивирует девушку по имени Зарина короткими текстами."
+        "Мотивируй ее на активные действия короткими сообщениями"
         "Зарина — моя девушка, у неё биополярное расстройство, поэтому вопросы должны быть лёгкими, поддерживающими и позитивными, чтобы поднимать настроение."
     }
         ],
@@ -49,7 +49,7 @@ def ask_openrouter_question():
 
 @bot.message_handler(commands=["start"])
 def start(message):
-    bot.send_message(message.chat.id, "Привет! Я буду задавать тебе вопросы.")
+    bot.send_message(message.chat.id, "Привет Зарина, надеюсь у тебя будет легкий день")
     ask_ai_question(message.chat.id)
 
 def ask_ai_question(chat_id):
@@ -66,7 +66,7 @@ def handle_answer(message):
     question = last_questions.get(message.chat.id, "Вопрос неизвестен")
     answer = message.text
     sheet.append_row([message.chat.id, question, answer])  # Записываем пару вопрос-ответ
-    bot.send_message(message.chat.id, "Ответ записан! Вот следующий вопрос:")
+    bot.send_message(message.chat.id, "Иди покакай")
     ask_ai_question(message.chat.id)
 
 # === Flask Webhook ===
