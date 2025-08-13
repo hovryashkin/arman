@@ -1,82 +1,71 @@
 import os
 import telebot
+import requests
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import requests
 from flask import Flask, request
 
-# === Настройки ===
-TOKEN = os.getenv("BOT_TOKEN")  # Токен бота
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")  # Ключ OpenRouter
-CREDENTIALS_FILE = "/etc/secrets/credentials.json"  # Путь к credentials.json на Render
-PORT = int(os.environ.get("PORT", 5000))  # Порт для Render
+# ==== НАСТРОЙКИ ====
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 
-# === Google Sheets авторизация ===
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
-client = gspread.authorize(creds)
-sheet = client.open("Zarina Answers").sheet1
-
-# === Telegram Bot ===
-bot = telebot.TeleBot(TOKEN)
-last_questions = {}  # Словарь для хранения последнего вопроса
-
-# === Flask для Render ===
+bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-def ask_openrouter_question():
+# ==== GOOGLE SHEETS ====
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_name("/etc/secrets/credentials.json", scope)
+client = gspread.authorize(creds)
+sheet = client.open_by_key(SPREADSHEET_ID).sheet1
+
+# ==== ФУНКЦИЯ GPT ====
+def generate_question():
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
     }
     data = {
-        "model": "mistralai/mistral-7b-instruct",
+        "model": "meta-llama/llama-3-70b-instruct",
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "Ты — злой и плохой собеседник, который общается с девушкой по имени Диана. "
-                    "Ты задаёшь ровно один короткий и интересный вопрос, чтобы её унизить. "
-                    "Отвечай только одним вопросом без списка, нумерации или лишних слов."
-                )
+                "content": "Ты задаешь только один короткий, личный и осмысленный вопрос на русском языке. Без пояснений, без списка, без викторины."
+            },
+            {
+                "role": "user",
+                "content": "Задай один вопрос."
             }
         ],
-        "max_tokens": 50,
-        "temperature": 0.8,
-        "top_p": 0.95
+        "temperature": 0.7
     }
-    response = requests.post(url, headers=headers, json=data)
-    response.raise_for_status()
-    result = response.json()
-    question = result["choices"][0]["message"]["content"].strip()
-    question = question.split("\n")[0]
-    return question
 
+    response = requests.post(url, headers=headers, json=data)
+    result = response.json()
+    try:
+        return result["choices"][0]["message"]["content"].strip()
+    except Exception:
+        return "Что для тебя сейчас самое важное?"
+
+# ==== ЛОГИКА БОТА ====
 @bot.message_handler(commands=["start"])
 def start(message):
-    bot.send_message(message.chat.id, "Привет, Диана ❤️ Я буду задавать тебе вопросы.")
-    ask_ai_question(message.chat.id)
+    bot.send_message(message.chat.id, "Привет, давай начнём!")
+    question = generate_question()
+    bot.send_message(message.chat.id, question)
 
-def ask_ai_question(chat_id):
-    try:
-        question = ask_openrouter_question()
-        bot.send_message(chat_id, question)
-        sheet.append_row([chat_id, question, "вопрос"])
-        last_questions[chat_id] = question
-    except Exception as e:
-        bot.send_message(chat_id, f"Ошибка: {e}")
+@bot.message_handler(func=lambda message: True)
+def save_answer(message):
+    # Сохраняем ответ в Google Таблицу
+    sheet.append_row([message.from_user.first_name, message.text])
 
-@bot.message_handler(func=lambda m: True)
-def handle_answer(message):
-    chat_id = message.chat.id
-    answer = message.text
-    if chat_id in last_questions:
-        sheet.append_row([chat_id, last_questions[chat_id], answer])
-    ask_ai_question(chat_id)
+    # Задаём следующий вопрос
+    question = generate_question()
+    bot.send_message(message.chat.id, question)
 
-# === Webhook для Render ===
-@app.route(f"/{TOKEN}", methods=["POST"])
+# ==== WEBHOOK ====
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     json_str = request.get_data().decode("UTF-8")
     update = telebot.types.Update.de_json(json_str)
@@ -85,9 +74,7 @@ def webhook():
 
 @app.route("/", methods=["GET"])
 def index():
-    return "Бот работает!", 200
+    return "Бот работает!"
 
 if __name__ == "__main__":
-    bot.remove_webhook()
-    bot.set_webhook(url=f"{os.getenv('RENDER_EXTERNAL_URL')}/{TOKEN}")
-    app.run(host="0.0.0.0", port=PORT)
+    app.run(host="0.0.0.0", port=10000)
