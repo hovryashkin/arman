@@ -1,4 +1,3 @@
-
 import os
 import telebot
 import gspread
