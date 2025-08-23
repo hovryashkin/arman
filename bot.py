@@ -1,4 +1,3 @@
-
 import os
 import telebot
 import gspread
@@ -20,7 +19,7 @@ sheet = client.open("Zarina Answers").sheet1
 # === Telegram Bot ===
 bot = telebot.TeleBot(TOKEN)
 
-# Словарь для хранения последнего вопроса
+# Словарь для хранения последнего вопроса для каждого пользователя
 last_questions = {}
 
 def ask_openrouter_question():
@@ -32,33 +31,21 @@ def ask_openrouter_question():
     data = {
         "model": "mistralai/mistral-7b-instruct",
         "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "Ты — доброжелательный и понимающий собеседник, который общается с девушкой по имени Зарина. "
-                    "Ты задаёшь ровно один короткий и интересный вопрос, чтобы лучше её узнать. "
-                    "Вопросы должны быть разнообразными — о семье, творчестве, интересах, с юмором, философские и душевные. "
-                    "Зарина — моя девушка, у неё биполярное расстройство, поэтому вопросы должны быть лёгкими, тёплыми и поддерживающими, "
-                    "чтобы поднимать настроение. Избегай тяжёлых и тревожных тем. "
-                    "Отвечай только одним вопросом без списка, нумерации или лишних слов."
-                )
-            }
+            {"role": "system", "content": "Придумай один интересный вопрос для викторины."}
         ],
-        "max_tokens": 50,
-        "temperature": 0.8,
+        "max_tokens": 100,
+        "temperature": 0.7,
         "top_p": 0.95
     }
     response = requests.post(url, headers=headers, json=data)
     response.raise_for_status()
     result = response.json()
-    question = result["choices"][0]["message"]["content"].strip()
-    # Если модель вернула несколько строк, берём первую
-    question = question.split("\n")[0]
+    question = result["choices"][0]["message"]["content"]
     return question
 
 @bot.message_handler(commands=["start"])
 def start(message):
-    bot.send_message(message.chat.id, "Привет, Зарина ❤️ Я буду задавать тебе вопросы.")
+    bot.send_message(message.chat.id, "Привет! Я буду задавать тебе вопросы.")
     ask_ai_question(message.chat.id)
 
 def ask_ai_question(chat_id):
@@ -66,7 +53,7 @@ def ask_ai_question(chat_id):
         question = ask_openrouter_question()
         bot.send_message(chat_id, question)
         sheet.append_row([chat_id, question, "вопрос"])
-        last_questions[chat_id] = question
+        last_questions[chat_id] = question  # Сохраняем вопрос для пользователя
     except Exception as e:
         bot.send_message(chat_id, f"Ошибка при получении вопроса от ИИ: {str(e)}")
 
@@ -74,7 +61,7 @@ def ask_ai_question(chat_id):
 def handle_answer(message):
     question = last_questions.get(message.chat.id, "Вопрос неизвестен")
     answer = message.text
-    sheet.append_row([message.chat.id, question, answer])
+    sheet.append_row([message.chat.id, question, answer])  # Записываем пару вопрос-ответ
     bot.send_message(message.chat.id, "Ответ записан! Вот следующий вопрос:")
     ask_ai_question(message.chat.id)
 
