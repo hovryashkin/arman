@@ -34,16 +34,14 @@ def ask_openrouter_question():
             {
                 "role": "system",
                 "content": (
-                    "Ты — доброжелательный и понимающий собеседник, который общается с девушкой по имени Зарина. "
-                    "Ты задаёшь ровно один короткий и интересный вопрос, чтобы лучше её узнать. "
-                    "Вопросы должны быть разнообразными — о семье, творчестве, интересах, с юмором, философские и душевные. "
-                    "Зарина — моя девушка, у неё биполярное расстройство, поэтому вопросы должны быть лёгкими, тёплыми и поддерживающими, "
-                    "чтобы поднимать настроение. Избегай тяжёлых и тревожных тем. "
+                    "Ты — доброжелательный и понимающий собеседник "
+                    "Ты задаёшь ровно один короткий и интересный вопрос, чтобы лучше узнать человека. "
+                    "Вопросы должны быть разнообразными"
                     "Отвечай только одним вопросом без списка, нумерации или лишних слов."
                 )
             }
         ],
-        "max_tokens": 50,
+        "max_tokens": 100,
         "temperature": 0.8,
         "top_p": 0.95
     }
@@ -51,20 +49,18 @@ def ask_openrouter_question():
     response.raise_for_status()
     result = response.json()
     question = result["choices"][0]["message"]["content"].strip()
-    # Если модель вернула несколько строк, берём первую
-    question = question.split("\n")[0]
-    return question
+    return question.split("\n")[0]
 
 @bot.message_handler(commands=["start"])
 def start(message):
-    bot.send_message(message.chat.id, "Привет, Зарина ❤️ Я буду задавать тебе вопросы.")
+    bot.send_message(message.chat.id, "Привет! Хочу задать тебе пару вопросов!.")
     ask_ai_question(message.chat.id)
 
 def ask_ai_question(chat_id):
     try:
         question = ask_openrouter_question()
         bot.send_message(chat_id, question)
-        sheet.append_row([chat_id, question, "вопрос"])
+        # Сохраняем только в память, не в таблицу
         last_questions[chat_id] = question
     except Exception as e:
         bot.send_message(chat_id, f"Ошибка при получении вопроса от ИИ: {str(e)}")
@@ -73,7 +69,17 @@ def ask_ai_question(chat_id):
 def handle_answer(message):
     question = last_questions.get(message.chat.id, "Вопрос неизвестен")
     answer = message.text
-    sheet.append_row([message.chat.id, question, answer])
+    user = message.from_user
+
+    # Сохраняем сразу вопрос+ответ в таблицу
+    sheet.append_row([
+        user.id,
+        user.first_name or "",
+        user.username or "",
+        question,
+        answer
+    ])
+
     bot.send_message(message.chat.id, "Ответ записан! Вот следующий вопрос:")
     ask_ai_question(message.chat.id)
 
