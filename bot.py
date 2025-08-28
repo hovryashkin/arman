@@ -25,8 +25,10 @@ def get_openrouter_answer(user_question):
     """
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
+    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+    "HTTP-Referer": "https://github.com/Arman",  # можно любой URL
+    "X-Title": "ZarinaBot",
+    "Content-Type": "application/json"
     }
     data = {
         "model": "mistralai/mistral-7b-instruct",
