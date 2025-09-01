@@ -77,42 +77,30 @@ def start(message):
 @bot.message_handler(commands=["donate"])
 def donate(message):
     keyboard = types.InlineKeyboardMarkup()
+    kaspi_number = "77089871147"   # номер телефона, привязанный к Kaspi
+    amount = 1000                  # сумма по умолчанию (можно менять)
+    kaspi_link = f"https://kaspi.kz/pay/{kaspi_number}?amount={amount}"
 
-    kaspi_card = "4400430385306623"  # твоя карта
-    amounts = [1000, 2000, 5000]     # суммы доната
-
-    # Генерируем кнопки для выбора суммы
-    for amount in amounts:
-        btn = types.InlineKeyboardButton(f"💳 {amount}₸", callback_data=f"donate_{amount}")
-        keyboard.add(btn)
-
-    bot.send_message(
-        message.chat.id,
-        "Выбери сумму для доната ❤️",
-        reply_markup=keyboard
-    )
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("donate_"))
-def process_donate(call):
-    amount = call.data.split("_")[1]
-    kaspi_card = "4400430385306623"
-    link = f"https://kaspi.kz/pay/{kaspi_card}?amount={amount}"
+    pay_button = types.InlineKeyboardButton("💳 Оплатить через Kaspi", url=kaspi_link)
+    keyboard.add(pay_button)
 
     # Генерация QR-кода
-    qr_img = qrcode.make(link)
+    qr_img = qrcode.make(kaspi_link)
     bio = BytesIO()
     qr_img.save(bio, format="PNG")
     bio.seek(0)
 
     bot.send_photo(
-        call.message.chat.id,
+        message.chat.id,
         photo=bio,
-        caption=f"Спасибо за поддержку ❤️\n\nКарта: `{kaspi_card}`\nСумма: {amount}₸",
+        caption=(
+            f"Спасибо за поддержку ❤️\n\n"
+            f"Kaspi Gold (по номеру): `{kaspi_number}`\n"
+            f"Сумма: {amount} ₸"
+        ),
+        reply_markup=keyboard,
         parse_mode="Markdown"
     )
-
-
 @bot.message_handler(func=lambda m: True)
 def handle_question(message):
     user = message.from_user
