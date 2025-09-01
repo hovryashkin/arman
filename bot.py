@@ -7,6 +7,7 @@ import requests
 from flask import Flask, request
 import qrcode
 from io import BytesIO
+from collections import defaultdict, deque
 
 # === Настройки ===
 TOKEN = os.getenv("BOT_TOKEN")
@@ -22,28 +23,28 @@ sheet = client.open("Zarina Answers").sheet1
 # === Telegram Bot ===
 bot = telebot.TeleBot(TOKEN)
 
-# Хранилище диалогов (в оперативке)
-user_sessions = {}
+# Храним историю сообщений: user_id -> очередь (до 10 сообщений)
+user_histories = defaultdict(lambda: deque(maxlen=10))
 
-def get_openrouter_answer(user_id, user_message):
+def get_openrouter_answer(user_id, user_question):
     """
-    Отправляем историю диалога пользователя в OpenRouter и получаем ответ
+    Отправляем вопрос пользователя в OpenRouter с учётом контекста
     """
-    if user_id not in user_sessions:
-        user_sessions[user_id] = [
-            {
-                "role": "system",
-                "content": (
-                    "Ты флирт-бот 💋. Отвечай всегда на русском языке, тепло, игриво и слегка романтично. "
-                    "Будь понимающим, добавляй нотку флирта и эмоций, но избегай пошлости. "
-                    "Ответы должны быть короткими, естественными, будто пишет человек. "
-                    "Можешь использовать смайлики для настроения ❤️😉✨."
-                )
-            }
-        ]
-    
-    # Добавляем сообщение пользователя
-    user_sessions[user_id].append({"role": "user", "content": user_message})
+    # Добавляем новое сообщение в историю
+    user_histories[user_id].append({"role": "user", "content": user_question})
+
+    # Формируем массив сообщений (системное + история)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты флирт-бот 💋. Отвечай всегда на русском языке, тепло, игриво и слегка романтично. "
+                "Будь понимающим, добавляй нотку флирта и эмоций, но избегай пошлости. "
+                "Ответы должны быть короткими, естественными, будто пишет человек. "
+                "Можешь использовать смайлики для настроения ❤️😉✨."
+            )
+        }
+    ] + list(user_histories[user_id])
 
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
@@ -54,7 +55,7 @@ def get_openrouter_answer(user_id, user_message):
     }
     data = {
         "model": "mistralai/mistral-7b-instruct",
-        "messages": user_sessions[user_id],
+        "messages": messages,
         "max_tokens": 500,
         "temperature": 0.8,
         "top_p": 0.95
@@ -65,28 +66,26 @@ def get_openrouter_answer(user_id, user_message):
     result = response.json()
     answer = result["choices"][0]["message"]["content"].strip()
 
-    # Добавляем ответ бота в историю
-    user_sessions[user_id].append({"role": "assistant", "content": answer})
+    # Сохраняем ответ в историю
+    user_histories[user_id].append({"role": "assistant", "content": answer})
 
     return answer
 
 @bot.message_handler(commands=["start"])
 def start(message):
-    bot.send_message(message.chat.id, "Привет! Давай пообщаемся 😉")
+    bot.send_message(message.chat.id, "Привет! Задай мне любой вопрос 💬")
 
 @bot.message_handler(commands=["donate"])
 def donate(message):
     keyboard = types.InlineKeyboardMarkup()
-    kaspi_number = "+77089871147"
-    pay_button = types.InlineKeyboardButton(
-        "💳 Оплатить через Kaspi",
-        url=f"https://kaspi.kz/pay/{kaspi_number}"
-    )
+    kaspi_number = "77089871147"   # без плюса!
+    kaspi_link = f"https://kaspi.kz/pay/{kaspi_number}"
+
+    pay_button = types.InlineKeyboardButton("💳 Оплатить через Kaspi", url=kaspi_link)
     keyboard.add(pay_button)
 
-    qr_data = f"https://kaspi.kz/pay/{kaspi_number}"
-    qr_img = qrcode.make(qr_data)
-
+    # Генерация QR-кода
+    qr_img = qrcode.make(kaspi_link)
     bio = BytesIO()
     qr_img.save(bio, format="PNG")
     bio.seek(0)
@@ -105,7 +104,7 @@ def handle_question(message):
     question = message.text
 
     try:
-        # Получаем ответ с учетом истории
+        # Получаем ответ от OpenRouter с памятью
         answer = get_openrouter_answer(user.id, question)
 
         # Отправляем пользователю
@@ -121,7 +120,7 @@ def handle_question(message):
         ])
 
     except Exception as e:
-        bot.send_message(message.chat.id, f"Ошибка: {str(e)}")
+        bot.send_message(message.chat.id, f"Ошибка при получении ответа: {str(e)}")
 
 # === Flask Webhook ===
 app = Flask(__name__)
