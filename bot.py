@@ -22,20 +22,15 @@ sheet = client.open("Zarina Answers").sheet1
 # === Telegram Bot ===
 bot = telebot.TeleBot(TOKEN)
 
-def get_openrouter_answer(user_question):
+# Хранилище диалогов (в оперативке)
+user_sessions = {}
+
+def get_openrouter_answer(user_id, user_message):
     """
-    Отправляем вопрос пользователя в OpenRouter и получаем ответ
+    Отправляем историю диалога пользователя в OpenRouter и получаем ответ
     """
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "HTTP-Referer": "https://github.com/Arman",  # можно любой URL
-        "X-Title": "ZarinaBot",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "model": "mistralai/mistral-7b-instruct",
-        "messages": [
+    if user_id not in user_sessions:
+        user_sessions[user_id] = [
             {
                 "role": "system",
                 "content": (
@@ -44,13 +39,23 @@ def get_openrouter_answer(user_question):
                     "Ответы должны быть короткими, естественными, будто пишет человек. "
                     "Можешь использовать смайлики для настроения ❤️😉✨."
                 )
-            },
-            {
-                "role": "user",
-                "content": user_question
             }
-        ],
-        "max_tokens": 3000,
+        ]
+    
+    # Добавляем сообщение пользователя
+    user_sessions[user_id].append({"role": "user", "content": user_message})
+
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "HTTP-Referer": "https://github.com/Arman",
+        "X-Title": "ZarinaBot",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": "mistralai/mistral-7b-instruct",
+        "messages": user_sessions[user_id],
+        "max_tokens": 500,
         "temperature": 0.8,
         "top_p": 0.95
     }
@@ -58,23 +63,27 @@ def get_openrouter_answer(user_question):
     response = requests.post(url, headers=headers, json=data)
     response.raise_for_status()
     result = response.json()
-    return result["choices"][0]["message"]["content"].strip()
+    answer = result["choices"][0]["message"]["content"].strip()
+
+    # Добавляем ответ бота в историю
+    user_sessions[user_id].append({"role": "assistant", "content": answer})
+
+    return answer
 
 @bot.message_handler(commands=["start"])
 def start(message):
-    bot.send_message(message.chat.id, "Привет! Задай мне любой вопрос 💬")
+    bot.send_message(message.chat.id, "Привет! Давай пообщаемся 😉")
 
 @bot.message_handler(commands=["donate"])
 def donate(message):
     keyboard = types.InlineKeyboardMarkup()
-    kaspi_number = "+77089871147"   # 👉 вставь сюда свой номер Kaspi
+    kaspi_number = "+77089871147"
     pay_button = types.InlineKeyboardButton(
         "💳 Оплатить через Kaspi",
         url=f"https://kaspi.kz/pay/{kaspi_number}"
     )
     keyboard.add(pay_button)
 
-    # Генерация QR-кода
     qr_data = f"https://kaspi.kz/pay/{kaspi_number}"
     qr_img = qrcode.make(qr_data)
 
@@ -96,8 +105,8 @@ def handle_question(message):
     question = message.text
 
     try:
-        # Получаем ответ от OpenRouter
-        answer = get_openrouter_answer(question)
+        # Получаем ответ с учетом истории
+        answer = get_openrouter_answer(user.id, question)
 
         # Отправляем пользователю
         bot.send_message(message.chat.id, answer)
@@ -112,7 +121,7 @@ def handle_question(message):
         ])
 
     except Exception as e:
-        bot.send_message(message.chat.id, f"Ошибка при получении ответа: {str(e)}")
+        bot.send_message(message.chat.id, f"Ошибка: {str(e)}")
 
 # === Flask Webhook ===
 app = Flask(__name__)
