@@ -1,9 +1,12 @@
 import os
 import telebot
+from telebot import types
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import requests
 from flask import Flask, request
+import qrcode
+from io import BytesIO
 
 # === Настройки ===
 TOKEN = os.getenv("BOT_TOKEN")
@@ -25,10 +28,10 @@ def get_openrouter_answer(user_question):
     """
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
-    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-    "HTTP-Referer": "https://github.com/Arman",  # можно любой URL
-    "X-Title": "ZarinaBot",
-    "Content-Type": "application/json"
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "HTTP-Referer": "https://github.com/Arman",  # можно любой URL
+        "X-Title": "ZarinaBot",
+        "Content-Type": "application/json"
     }
     data = {
         "model": "mistralai/mistral-7b-instruct",
@@ -36,9 +39,10 @@ def get_openrouter_answer(user_question):
             {
                 "role": "system",
                 "content": (
-                    "Ты доброжелательный и понимающий собеседник. "
-                    "Отвечай на вопросы пользователя честно, кратко и интересно. "
-                    "Всегда отвечай на русском языке и без ошибок."
+                    "Ты флирт-бот 💋. Отвечай всегда на русском языке, тепло, игриво и слегка романтично. "
+                    "Будь понимающим, добавляй нотку флирта и эмоций, но избегай пошлости. "
+                    "Ответы должны быть короткими, естественными, будто пишет человек. "
+                    "Можешь использовать смайлики для настроения ❤️😉✨."
                 )
             },
             {
@@ -59,6 +63,32 @@ def get_openrouter_answer(user_question):
 @bot.message_handler(commands=["start"])
 def start(message):
     bot.send_message(message.chat.id, "Привет! Задай мне любой вопрос 💬")
+
+@bot.message_handler(commands=["donate"])
+def donate(message):
+    keyboard = types.InlineKeyboardMarkup()
+    kaspi_number = "+77089871147"   # 👉 вставь сюда свой номер Kaspi
+    pay_button = types.InlineKeyboardButton(
+        "💳 Оплатить через Kaspi",
+        url=f"https://kaspi.kz/pay/{kaspi_number}"
+    )
+    keyboard.add(pay_button)
+
+    # Генерация QR-кода
+    qr_data = f"https://kaspi.kz/pay/{kaspi_number}"
+    qr_img = qrcode.make(qr_data)
+
+    bio = BytesIO()
+    qr_img.save(bio, format="PNG")
+    bio.seek(0)
+
+    bot.send_photo(
+        message.chat.id,
+        photo=bio,
+        caption=f"Спасибо за поддержку ❤️\n\nKaspi Gold: `{kaspi_number}`",
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
 
 @bot.message_handler(func=lambda m: True)
 def handle_question(message):
