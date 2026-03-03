@@ -27,46 +27,34 @@ bot = telebot.TeleBot(TOKEN)
 user_histories = defaultdict(lambda: deque(maxlen=10))
 
 def get_openrouter_answer(user_id, user_question):
-    """
-    Отправляем вопрос пользователя в OpenRouter с учётом контекста
-    """
-    # Добавляем новое сообщение в историю
     user_histories[user_id].append({"role": "user", "content": user_question})
 
-    # Формируем массив сообщений (системное + история)
     messages = [
         {
             "role": "system",
-            "content": (
-                "Ты бот по имени Арман мужского пола созданный для девушки. Отвечай всегда на русском языке, тепло, игриво и слегка романтично. "
-                "Будь понимающим, добавляй нотку флирта и эмоций, но избегай пошлости. "
-                "Ответы должны быть короткими, естественными, будто пишет человек. "
-                "Можешь использовать смайлики для настроения ❤️😉✨."
-            )
+            "content": "Ты флирт-бот. Отвечай коротко, тепло и романтично на русском."
         }
     ] + list(user_histories[user_id])
 
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "HTTP-Referer": "https://github.com/Arman",
-        "X-Title": "ZarinaBot",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "model": "mistralai/mistral-7b-instruct",
-        "messages": messages,
-        "max_tokens": 500,
-        "temperature": 0.8,
-        "top_p": 0.95
-    }
+    response = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "model": "meta-llama/llama-3-8b-instruct",
+            "messages": messages
+        }
+    )
 
-    response = requests.post(url, headers=headers, json=data)
+    print(response.status_code)
+    print(response.text)
+
     response.raise_for_status()
-    result = response.json()
-    answer = result["choices"][0]["message"]["content"].strip()
 
-    # Сохраняем ответ в историю
+    answer = response.json()["choices"][0]["message"]["content"]
+
     user_histories[user_id].append({"role": "assistant", "content": answer})
 
     return answer
