@@ -153,13 +153,13 @@ def handle_message(message):
 
 
 # ================= WEBHOOK =================
-
-@app.route(f"/webhook/{TOKEN}", methods=["POST"])
-def webhook():
-    json_str = request.get_data().decode("UTF-8")
-    update = telebot.types.Update.de_json(json_str)
-    bot.process_new_updates([update])
-    return "OK", 200
+@app.route("/set_webhook")
+def set_webhook():
+    bot.remove_webhook()
+    bot.set_webhook(
+        url=f"https://arman-c2rh.onrender.com/webhook/{TOKEN}"
+    )
+    return "Webhook set!"
 
 
 @app.route("/")
