@@ -15,7 +15,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 CREDENTIALS_FILE = "/etc/secrets/credentials.json"
 
-RENDER_URL = "https://YOUR_RENDER_URL.onrender.com"  # <-- ЗАМЕНИ НА СВОЙ URL
+RENDER_URL = "https://arman-c2rh.onrender.com"
 
 # ================= GOOGLE SHEETS =================
 
@@ -30,14 +30,12 @@ creds = ServiceAccountCredentials.from_json_keyfile_name(
 client = gspread.authorize(creds)
 sheet = client.open("Zarina Answers").sheet1
 
-# ================= TELEGRAM BOT =================
+# ================= TELEGRAM + FLASK =================
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-# Память сообщений
 user_histories = defaultdict(lambda: deque(maxlen=10))
-
 
 # ================= OPENROUTER =================
 
@@ -49,7 +47,11 @@ def get_openrouter_answer(user_id, user_question):
     messages = [
         {
             "role": "system",
-            "content": "Ты флирт-бот. Отвечай коротко, тепло и романтично на русском."
+            "content": (
+                "Ты — игривяй, романтичный парень💋 "
+                "Отвечай коротко (1-3 предложения), тепло, слегка флиртуй. "
+                "Без пошлости. Можно использовать ❤️😉✨"
+            )
         }
     ] + list(user_histories[user_id])
 
@@ -62,7 +64,8 @@ def get_openrouter_answer(user_id, user_question):
         json={
             "model": "meta-llama/llama-3-8b-instruct",
             "messages": messages,
-            "temperature": 0.8
+            "temperature": 1.0,
+            "top_p": 0.95
         }
     )
 
@@ -79,16 +82,14 @@ def get_openrouter_answer(user_id, user_question):
 
     return answer
 
-
 # ================= КОМАНДЫ =================
 
 @bot.message_handler(commands=["start"])
 def start(message):
     bot.send_message(
         message.chat.id,
-        "Привет солнце ❤️ Напиши мне что-нибудь..."
+        "Привет ❤️ Я скучал... Напиши мне что-нибудь 😉"
     )
-
 
 @bot.message_handler(commands=["donate"])
 def donate(message):
@@ -122,7 +123,6 @@ def donate(message):
         parse_mode="Markdown"
     )
 
-
 @bot.message_handler(func=lambda m: True)
 def handle_message(message):
     user = message.from_user
@@ -142,30 +142,27 @@ def handle_message(message):
                 answer
             ])
         except Exception as e:
-            print("Ошибка записи в таблицу:", e)
+            print("Google Sheets error:", e)
 
     except Exception as e:
-        print("Ошибка OpenRouter:", e)
+        print("OpenRouter error:", e)
         bot.send_message(
             message.chat.id,
-            f"Ошибка при получении ответа: {str(e)}"
+            "Ой... что-то пошло не так 😔 Попробуй ещё раз."
         )
 
-
 # ================= WEBHOOK =================
-@app.route("/set_webhook")
-def set_webhook():
-    bot.remove_webhook()
-    bot.set_webhook(
-        url=f"https://arman-c2rh.onrender.com/webhook/{TOKEN}"
-    )
-    return "Webhook set!"
 
+@app.route(f"/webhook/{TOKEN}", methods=["POST"])
+def webhook():
+    json_str = request.get_data().decode("UTF-8")
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return "OK", 200
 
 @app.route("/")
 def index():
     return "Bot is running", 200
-
 
 # ================= ЗАПУСК =================
 
