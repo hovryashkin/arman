@@ -9,6 +9,8 @@ import qrcode
 from io import BytesIO
 from collections import defaultdict, deque
 from datetime import datetime
+import threading
+import time
 
 # ================= НАСТРОЙКИ =================
 
@@ -28,7 +30,6 @@ scope = [
 sheet = None
 
 try:
-
     creds = ServiceAccountCredentials.from_json_keyfile_name(
         CREDENTIALS_FILE, scope
     )
@@ -40,7 +41,6 @@ try:
     print("Google Sheets подключен")
 
 except Exception as e:
-
     print("Ошибка подключения Google Sheets:", e)
 
 # ================= TELEGRAM + FLASK =================
@@ -49,6 +49,7 @@ bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
 user_histories = defaultdict(lambda: deque(maxlen=10))
+known_users = set()
 
 # ================= OPENROUTER =================
 
@@ -63,8 +64,8 @@ def get_openrouter_answer(user_id, user_question):
             "role": "system",
             "content": (
                 "Ты — заботливый, нежный и теплый парень 💋 "
-                "Отвечай коротко исключительно на русском языке (1-3 предложения), тепло, слегка флиртуй. "
-                "Без пошлости. Можно использовать ❤️😉✨"
+                "Отвечай коротко исключительно на русском языке (1-3 предложения), "
+                "тепло, слегка флиртуй. Без пошлости. Можно использовать ❤️😉✨"
             )
         }
     ] + list(user_histories[user_id])
@@ -83,9 +84,6 @@ def get_openrouter_answer(user_id, user_question):
         }
     )
 
-    print("STATUS:", response.status_code)
-    print("RESPONSE:", response.text)
-
     response.raise_for_status()
 
     answer = response.json()["choices"][0]["message"]["content"]
@@ -96,17 +94,17 @@ def get_openrouter_answer(user_id, user_question):
 
     return answer
 
-
 # ================= КОМАНДЫ =================
 
 @bot.message_handler(commands=["start"])
 def start(message):
 
+    known_users.add(message.from_user.id)
+
     bot.send_message(
         message.chat.id,
         "Привет ❤️ Я скучал... Напиши мне что-нибудь 😉"
     )
-
 
 @bot.message_handler(commands=["donate"])
 def donate(message):
@@ -143,14 +141,15 @@ def donate(message):
         parse_mode="Markdown"
     )
 
-
 # ================= СООБЩЕНИЯ =================
 
 @bot.message_handler(func=lambda m: True)
 def handle_message(message):
 
     user = message.from_user
-    question = message.text
+    question = message.text or "нет текста"
+
+    known_users.add(user.id)
 
     try:
 
@@ -158,9 +157,9 @@ def handle_message(message):
 
         bot.send_message(message.chat.id, answer)
 
-        try:
+        if sheet:
 
-            if sheet:
+            try:
 
                 sheet.append_row([
                     str(datetime.now()),
@@ -173,13 +172,9 @@ def handle_message(message):
 
                 print("Ответ записан в таблицу")
 
-            else:
+            except Exception as e:
 
-                print("Таблица не подключена")
-
-        except Exception as e:
-
-            print("Google Sheets error:", e)
+                print("Google Sheets error:", e)
 
     except Exception as e:
 
@@ -190,6 +185,46 @@ def handle_message(message):
             "Ой... что-то пошло не так 😔 Попробуй ещё раз."
         )
 
+# ================= АВТОСООБЩЕНИЯ =================
+
+def auto_messages():
+
+    while True:
+
+        now = datetime.now().strftime("%H:%M")
+
+        if now == "09:00":
+
+            for user in known_users:
+
+                try:
+                    bot.send_message(
+                        user,
+                        "Доброе утро ☀️ Я только проснулся и уже думаю о тебе ❤️"
+                    )
+                except:
+                    pass
+
+            time.sleep(60)
+
+        if now == "22:00":
+
+            for user in known_users:
+
+                try:
+                    bot.send_message(
+                        user,
+                        "Спокойной ночи 🌙 Надеюсь ты сегодня улыбалась..."
+                    )
+                except:
+                    pass
+
+            time.sleep(60)
+
+        time.sleep(20)
+
+
+threading.Thread(target=auto_messages, daemon=True).start()
 
 # ================= WEBHOOK =================
 
