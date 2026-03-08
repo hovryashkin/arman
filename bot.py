@@ -8,6 +8,7 @@ from flask import Flask, request
 import qrcode
 from io import BytesIO
 from collections import defaultdict, deque
+from datetime import datetime
 
 # ================= НАСТРОЙКИ =================
 
@@ -20,15 +21,27 @@ RENDER_URL = "https://arman-c2rh.onrender.com"
 # ================= GOOGLE SHEETS =================
 
 scope = [
-    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
 
-creds = ServiceAccountCredentials.from_json_keyfile_name(
-    CREDENTIALS_FILE, scope
-)
-client = gspread.authorize(creds)
-sheet = client.open("Zarina Answers").sheet1
+sheet = None
+
+try:
+
+    creds = ServiceAccountCredentials.from_json_keyfile_name(
+        CREDENTIALS_FILE, scope
+    )
+
+    client = gspread.authorize(creds)
+
+    sheet = client.open("Zarina Answers").sheet1
+
+    print("Google Sheets подключен")
+
+except Exception as e:
+
+    print("Ошибка подключения Google Sheets:", e)
 
 # ================= TELEGRAM + FLASK =================
 
@@ -40,6 +53,7 @@ user_histories = defaultdict(lambda: deque(maxlen=10))
 # ================= OPENROUTER =================
 
 def get_openrouter_answer(user_id, user_question):
+
     user_histories[user_id].append(
         {"role": "user", "content": user_question}
     )
@@ -82,22 +96,27 @@ def get_openrouter_answer(user_id, user_question):
 
     return answer
 
+
 # ================= КОМАНДЫ =================
 
 @bot.message_handler(commands=["start"])
 def start(message):
+
     bot.send_message(
         message.chat.id,
         "Привет ❤️ Я скучал... Напиши мне что-нибудь 😉"
     )
 
+
 @bot.message_handler(commands=["donate"])
 def donate(message):
+
     keyboard = types.InlineKeyboardMarkup()
 
     kaspi_number = "77089871147"
     amount = 1000
-    kaspi_link = f"https://kaspi.kz/pay/{+77089871147}?amount={amount}"
+
+    kaspi_link = f"https://kaspi.kz/pay/{kaspi_number}?amount={amount}"
 
     pay_button = types.InlineKeyboardButton(
         "💳 Оплатить через Kaspi",
@@ -107,6 +126,7 @@ def donate(message):
     keyboard.add(pay_button)
 
     qr_img = qrcode.make(kaspi_link)
+
     bio = BytesIO()
     qr_img.save(bio, format="PNG")
     bio.seek(0)
@@ -116,59 +136,88 @@ def donate(message):
         photo=bio,
         caption=(
             f"Спасибо за поддержку ❤️\n\n"
-            f"Kaspi: `{+778089871147}`\n"
+            f"Kaspi: `{kaspi_number}`\n"
             f"Сумма: {amount} ₸"
         ),
         reply_markup=keyboard,
         parse_mode="Markdown"
     )
 
+
+# ================= СООБЩЕНИЯ =================
+
 @bot.message_handler(func=lambda m: True)
 def handle_message(message):
+
     user = message.from_user
     question = message.text
 
     try:
+
         answer = get_openrouter_answer(user.id, question)
 
         bot.send_message(message.chat.id, answer)
 
         try:
-            sheet.append_row([
-                user.id,
-                user.first_name or "",
-                user.username or "",
-                question,
-                answer
-            ])
+
+            if sheet:
+
+                sheet.append_row([
+                    str(datetime.now()),
+                    str(user.id),
+                    str(user.first_name or ""),
+                    str(user.username or ""),
+                    str(question),
+                    str(answer)
+                ])
+
+                print("Ответ записан в таблицу")
+
+            else:
+
+                print("Таблица не подключена")
+
         except Exception as e:
+
             print("Google Sheets error:", e)
 
     except Exception as e:
+
         print("OpenRouter error:", e)
+
         bot.send_message(
             message.chat.id,
             "Ой... что-то пошло не так 😔 Попробуй ещё раз."
         )
 
+
 # ================= WEBHOOK =================
 
 @app.route(f"/webhook/{TOKEN}", methods=["POST"])
 def webhook():
+
     json_str = request.get_data().decode("UTF-8")
+
     update = telebot.types.Update.de_json(json_str)
+
     bot.process_new_updates([update])
+
     return "OK", 200
+
 
 @app.route("/")
 def index():
     return "Bot is running", 200
 
+
 # ================= ЗАПУСК =================
 
 if __name__ == "__main__":
+
     bot.remove_webhook()
+
     bot.set_webhook(url=f"{RENDER_URL}/webhook/{TOKEN}")
 
     port = int(os.environ.get("PORT", 5000))
+
     app.run(host="0.0.0.0", port=port)
