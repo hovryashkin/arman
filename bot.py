@@ -11,6 +11,7 @@ from collections import defaultdict, deque
 from datetime import datetime
 import threading
 import time
+import random
 
 # ================= НАСТРОЙКИ =================
 
@@ -50,6 +51,17 @@ app = Flask(__name__)
 
 user_histories = defaultdict(lambda: deque(maxlen=10))
 known_users = set()
+user_waiting_diary = set()
+
+# ================= ВОПРОСЫ ДНЕВНИКА =================
+
+diary_questions = [
+    "Как прошёл твой день? 😊",
+    "Что сегодня сделало тебя счастливой? ❤️",
+    "О чём ты сегодня много думала?",
+    "Что сегодня было самым приятным моментом?",
+    "Что тебя сегодня немного расстроило?"
+]
 
 # ================= OPENROUTER =================
 
@@ -151,6 +163,11 @@ def handle_message(message):
 
     known_users.add(user.id)
 
+    diary_mode = False
+    if user.id in user_waiting_diary:
+        diary_mode = True
+        user_waiting_diary.remove(user.id)
+
     try:
 
         answer = get_openrouter_answer(user.id, question)
@@ -167,7 +184,8 @@ def handle_message(message):
                     str(user.first_name or ""),
                     str(user.username or ""),
                     str(question),
-                    str(answer)
+                    str(answer),
+                    "diary" if diary_mode else "chat"
                 ])
 
                 print("Ответ записан в таблицу")
@@ -207,6 +225,23 @@ def auto_messages():
 
             time.sleep(60)
 
+        if now == "20:00":
+
+            for user in known_users:
+
+                try:
+
+                    q = random.choice(diary_questions)
+
+                    bot.send_message(user, "💌 Вопрос дня:\n\n" + q)
+
+                    user_waiting_diary.add(user)
+
+                except:
+                    pass
+
+            time.sleep(60)
+
         if now == "22:00":
 
             for user in known_users:
@@ -223,7 +258,6 @@ def auto_messages():
 
         time.sleep(20)
 
-
 threading.Thread(target=auto_messages, daemon=True).start()
 
 # ================= WEBHOOK =================
@@ -239,11 +273,9 @@ def webhook():
 
     return "OK", 200
 
-
 @app.route("/")
 def index():
     return "Bot is running", 200
-
 
 # ================= ЗАПУСК =================
 
