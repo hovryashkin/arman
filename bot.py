@@ -12,6 +12,7 @@ from datetime import datetime
 import threading
 import time
 import random
+import pytz
 
 # ================= НАСТРОЙКИ =================
 
@@ -20,6 +21,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 CREDENTIALS_FILE = "/etc/secrets/credentials.json"
 
 RENDER_URL = "https://arman-c2rh.onrender.com"
+KZ_TIMEZONE = pytz.timezone("Asia/Almaty")
 
 # ================= GOOGLE SHEETS =================
 
@@ -209,7 +211,7 @@ def auto_messages():
 
     while True:
 
-        now = datetime.now().strftime("%H:%M")
+        now = datetime.now(KZ_TIMEZONE).strftime("%H:%M")
 
         if now == "09:00":
 
