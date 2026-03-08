@@ -48,8 +48,8 @@ def get_openrouter_answer(user_id, user_question):
         {
             "role": "system",
             "content": (
-                "Ты — игривая, романтичная девушка 💋 "
-                "Отвечай коротко (1-3 предложения), тепло, слегка флиртуй. "
+                "Ты — заботливый, нежный и теплый парень 💋 "
+                "Отвечай коротко исключительно на русском языке (1-3 предложения), тепло, слегка флиртуй. "
                 "Без пошлости. Можно использовать ❤️😉✨"
             )
         }
@@ -88,7 +88,7 @@ def get_openrouter_answer(user_id, user_question):
 def start(message):
     bot.send_message(
         message.chat.id,
-        "Привет ❤️ Я скучала... Напиши мне что-нибудь 😉"
+        "Привет ❤️ Я скучал... Напиши мне что-нибудь 😉"
     )
 
 @bot.message_handler(commands=["donate"])
@@ -97,7 +97,7 @@ def donate(message):
 
     kaspi_number = "77089871147"
     amount = 1000
-    kaspi_link = f"https://kaspi.kz/pay/{kaspi_number}?amount={amount}"
+    kaspi_link = f"https://kaspi.kz/pay/{+77089871147}?amount={amount}"
 
     pay_button = types.InlineKeyboardButton(
         "💳 Оплатить через Kaspi",
@@ -116,7 +116,7 @@ def donate(message):
         photo=bio,
         caption=(
             f"Спасибо за поддержку ❤️\n\n"
-            f"Kaspi: `{kaspi_number}`\n"
+            f"Kaspi: `{+778089871147}`\n"
             f"Сумма: {amount} ₸"
         ),
         reply_markup=keyboard,
