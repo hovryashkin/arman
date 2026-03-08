@@ -43,6 +43,18 @@ try:
 
     print("Google Sheets подключен")
 
+    # ✅ создаём заголовки если таблица пустая
+    if not sheet.get_all_values():
+        sheet.append_row([
+            "time",
+            "user_id",
+            "name",
+            "username",
+            "question",
+            "answer",
+            "type"
+        ])
+
 except Exception as e:
     print("Ошибка подключения Google Sheets:", e)
 
@@ -181,7 +193,7 @@ def handle_message(message):
             try:
 
                 sheet.append_row([
-                    str(datetime.now()),
+                    str(datetime.now(KZ_TIMEZONE)),
                     str(user.id),
                     str(user.first_name or ""),
                     str(user.username or ""),
