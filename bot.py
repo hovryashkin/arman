@@ -33,6 +33,7 @@ scope = [
 sheet = None
 
 try:
+
     creds = ServiceAccountCredentials.from_json_keyfile_name(
         CREDENTIALS_FILE, scope
     )
@@ -43,19 +44,8 @@ try:
 
     print("Google Sheets подключен")
 
-    # ✅ создаём заголовки если таблица пустая
-    if not sheet.get_all_values():
-        sheet.append_row([
-            "time",
-            "user_id",
-            "name",
-            "username",
-            "question",
-            "answer",
-            "type"
-        ])
-
 except Exception as e:
+
     print("Ошибка подключения Google Sheets:", e)
 
 # ================= TELEGRAM + FLASK =================
@@ -67,6 +57,31 @@ user_histories = defaultdict(lambda: deque(maxlen=10))
 known_users = set()
 user_waiting_diary = set()
 
+# ===== загрузка пользователей из таблицы =====
+
+def load_users_from_sheet():
+
+    if not sheet:
+        return
+
+    try:
+
+        rows = sheet.get_all_values()
+
+        for row in rows[1:]:
+
+            if len(row) > 1 and row[1]:
+
+                known_users.add(int(row[1]))
+
+        print("Пользователи загружены:", len(known_users))
+
+    except Exception as e:
+
+        print("Ошибка загрузки пользователей:", e)
+
+load_users_from_sheet()
+
 # ================= ВОПРОСЫ ДНЕВНИКА =================
 
 diary_questions = [
@@ -75,6 +90,18 @@ diary_questions = [
     "О чём ты сегодня много думала?",
     "Что сегодня было самым приятным моментом?",
     "Что тебя сегодня немного расстроило?"
+]
+
+# ===== НОВОЕ: случайные тёплые сообщения =====
+
+romantic_messages = [
+    "Я сегодня почему-то весь день думаю о тебе… 😊",
+    "Интересно, ты сейчас улыбаешься?",
+    "Иногда так приятно просто написать тебе…",
+    "Надеюсь у тебя сегодня хороший день ☀️",
+    "Просто напомню: ты очень классный человек ❤️",
+    "Иногда одно сообщение может сделать день лучше 😉",
+    "Я тут немного скучаю… решил написать"
 ]
 
 # ================= OPENROUTER =================
@@ -202,8 +229,6 @@ def handle_message(message):
                     "diary" if diary_mode else "chat"
                 ])
 
-                print("Ответ записан в таблицу")
-
             except Exception as e:
 
                 print("Google Sheets error:", e)
@@ -223,9 +248,10 @@ def auto_messages():
 
     while True:
 
-        now = datetime.now(KZ_TIMEZONE).strftime("%H:%M")
+        now = datetime.now(KZ_TIMEZONE)
+        hour = now.strftime("%H:%M")
 
-        if now == "09:00":
+        if hour.startswith("09:00"):
 
             for user in known_users:
 
@@ -239,7 +265,7 @@ def auto_messages():
 
             time.sleep(60)
 
-        if now == "20:00":
+        if hour.startswith("20:00"):
 
             for user in known_users:
 
@@ -256,7 +282,7 @@ def auto_messages():
 
             time.sleep(60)
 
-        if now == "22:00":
+        if hour.startswith("22:00"):
 
             for user in known_users:
 
@@ -269,6 +295,21 @@ def auto_messages():
                     pass
 
             time.sleep(60)
+
+        # ===== НОВОЕ: случайные сообщения =====
+
+        if random.random() < 0.02:
+
+            for user in known_users:
+
+                try:
+
+                    text = random.choice(romantic_messages)
+
+                    bot.send_message(user, text)
+
+                except:
+                    pass
 
         time.sleep(20)
 
