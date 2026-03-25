@@ -38,264 +38,246 @@ try:
     )
     client = gspread.authorize(creds)
     sheet = client.open("Zarina Answers").sheet1
-    print("Google Sheets подключен")
 except Exception as e:
-    print("Ошибка подключения Google Sheets:", e)
+    print("Sheets error:", e)
 
-# ================= TELEGRAM + FLASK =================
+# ================= TELEGRAM =================
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
 user_histories = defaultdict(lambda: deque(maxlen=10))
 known_users = set()
-user_waiting_diary = set()
 
-# ===== ТЕСТ ЛИЧНОСТИ =====
+# ===== СОСТОЯНИЯ =====
 
 user_test_state = {}
 user_test_answers = {}
+user_relation_mode = set()
+
+# ===== КНОПКИ =====
+
+def kb_ab():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("A", "B")
+    return kb
+
+def kb_yesno():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("Да", "Нет")
+    return kb
+
+def kb_menu():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("🔁 Пройти ещё раз", "💔 Отношения")
+    return kb
+
+# ===== ВОПРОСЫ =====
 
 test_questions = [
     "Ты чаще:\nA) привязываешься\nB) держишь дистанцию",
-    "Если человек тебе дорог, ты:\nA) покажешь это\nB) скроешь",
+    "Если человек тебе дорог:\nA) показываешь\nB) скрываешь",
     "Ты бы простил измену?\nA) да\nB) нет",
     "Ты больше:\nA) логика\nB) эмоции",
-    "Ты боишься потерять людей?\nA) да\nB) нет",
+    "Боишься потерять людей?\nA) да\nB) нет",
     "Ты чаще страдаешь молча?\nA) да\nB) нет"
 ]
 
-# ================= ЗАГРУЗКА ПОЛЬЗОВАТЕЛЕЙ =================
+relation_questions = [
+    "В отношениях ты:\nA) любишь сильнее\nB) держишь баланс",
+    "Если человек отдаляется:\nA) догоняешь\nB) отпускаешь",
+    "Ты ревнивый?\nA) да\nB) нет",
+    "Проверяешь человека?\nA) да\nB) нет",
+    "Боишься быть брошенным?\nA) да\nB) нет"
+]
 
-def load_users_from_sheet():
-    if not sheet:
-        return
-    try:
-        rows = sheet.get_all_values()
-        for row in rows[1:]:
-            if len(row) > 1 and row[1]:
-                known_users.add(int(row[1]))
-        print("Пользователи загружены:", len(known_users))
-    except Exception as e:
-        print("Ошибка загрузки пользователей:", e)
-
-load_users_from_sheet()
+reaction_phrases = [
+    "Хм… неожиданно 👀",
+    "Ты не такой простой 😏",
+    "Интересный выбор...",
+    "Я начинаю тебя понимать",
+    "Это многое говорит о тебе"
+]
 
 # ================= OPENROUTER =================
 
-def get_openrouter_answer(user_id, user_question):
+def ai_answer(uid, text):
 
-    user_histories[user_id].append(
-        {"role": "user", "content": user_question}
-    )
+    user_histories[uid].append({"role": "user", "content": text})
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "Ты — немного дерзкий, но заботливый человек. "
-                "Отвечай коротко (1-2 предложения), на русском. "
-                "Добавляй лёгкий флирт 😏❤️"
-            )
-        }
-    ] + list(user_histories[user_id])
+    messages = [{
+        "role": "system",
+        "content": (
+            "Ты дерзкий, тёплый и немного флиртующий. "
+            "Иногда ссылайся на прошлые сообщения. "
+            "Отвечай коротко (1-2 предложения)."
+        )
+    }] + list(user_histories[uid])
 
-    response = requests.post(
+    r = requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "model": "meta-llama/llama-3-8b-instruct",
-            "messages": messages,
-            "temperature": 1.0
-        }
+        headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+        json={"model": "meta-llama/llama-3-8b-instruct", "messages": messages}
     )
 
-    response.raise_for_status()
+    ans = r.json()["choices"][0]["message"]["content"]
+    user_histories[uid].append({"role": "assistant", "content": ans})
+    return ans
 
-    answer = response.json()["choices"][0]["message"]["content"]
-
-    user_histories[user_id].append(
-        {"role": "assistant", "content": answer}
-    )
-
-    return answer
-
-# ================= СТАРТ =================
+# ================= START =================
 
 @bot.message_handler(commands=["start"])
-def start(message):
+def start(m):
 
-    known_users.add(message.from_user.id)
+    uid = m.from_user.id
+    known_users.add(uid)
 
     bot.send_message(
-        message.chat.id,
-        "Я задам тебе 6 странных вопросов\n"
-        "И скажу, какой ты человек на самом деле 😏\n\n"
-        "Готов? (да / нет)"
+        m.chat.id,
+        "Я задам тебе 6 вопросов\nи скажу кто ты на самом деле 😏\n\nГотов?",
+        reply_markup=kb_yesno()
     )
 
-    user_test_state[message.from_user.id] = "start"
+    user_test_state[uid] = "start"
 
-# ================= ОСНОВНАЯ ЛОГИКА =================
+# ================= ЛОГИКА =================
 
 @bot.message_handler(func=lambda m: True)
-def handle_message(message):
+def msg(m):
 
-    user_id = message.from_user.id
-    text = (message.text or "").lower()
+    uid = m.from_user.id
+    text = (m.text or "").lower()
 
-    known_users.add(user_id)
+    # ===== МЕНЮ =====
+
+    if text == "🔁 пройти ещё раз":
+        user_test_state[uid] = "start"
+        bot.send_message(m.chat.id, "Ещё раз? 😏", reply_markup=kb_yesno())
+        return
+
+    if text == "💔 отношения":
+        user_relation_mode.add(uid)
+        user_test_state[uid] = 0
+        user_test_answers[uid] = []
+        bot.send_message(m.chat.id, "Окей… давай честно 😏")
+        bot.send_message(m.chat.id, relation_questions[0], reply_markup=kb_ab())
+        return
 
     # ===== ТЕСТ =====
 
-    if user_id in user_test_state:
+    if uid in user_test_state:
 
-        state = user_test_state[user_id]
+        state = user_test_state[uid]
 
         if state == "start":
 
-            if "да" in text:
-
-                user_test_state[user_id] = 0
-                user_test_answers[user_id] = []
-
-                bot.send_message(message.chat.id, test_questions[0])
-                return
-
+            if text == "да":
+                user_test_state[uid] = 0
+                user_test_answers[uid] = []
+                bot.send_message(m.chat.id, test_questions[0], reply_markup=kb_ab())
             else:
-                bot.send_message(message.chat.id, "Ладно… но ты многое упустил 😏")
-                del user_test_state[user_id]
-                return
+                bot.send_message(m.chat.id, "Ладно… зря 😏")
+                del user_test_state[uid]
+            return
 
         if isinstance(state, int):
 
             if text not in ["a", "b", "а", "б"]:
-                bot.send_message(message.chat.id, "Ответь A или B")
                 return
 
-            user_test_answers[user_id].append(text)
+            user_test_answers[uid].append(text)
 
             next_q = state + 1
+            qs = relation_questions if uid in user_relation_mode else test_questions
 
-            if next_q < len(test_questions):
+            if next_q < len(qs):
 
-                user_test_state[user_id] = next_q
-                bot.send_message(message.chat.id, test_questions[next_q])
+                user_test_state[uid] = next_q
+
+                bot.send_message(m.chat.id, random.choice(reaction_phrases))
+                time.sleep(0.7)
+
+                bot.send_message(m.chat.id, qs[next_q], reply_markup=kb_ab())
                 return
+
+            # ===== ВАУ ЭФФЕКТ =====
+
+            bot.send_chat_action(m.chat.id, "typing")
+            time.sleep(1.5)
+            bot.send_message(m.chat.id, "Интересно...")
+            time.sleep(1)
+            bot.send_chat_action(m.chat.id, "typing")
+            time.sleep(1.5)
+
+            answers = user_test_answers[uid]
+            a = sum(1 for x in answers if x in ["a","а"])
+            b = len(answers)-a
+            score = a-b
+
+            percent = int((a / len(answers)) * 100)
+
+            # ===== РЕЗУЛЬТАТ =====
+
+            if uid in user_relation_mode:
+
+                if a > b:
+                    res = f"Ты любишь сильнее.\nНа {percent}% ты эмоциональный.\nТы отдаёшь больше, чем получаешь."
+                else:
+                    res = f"Ты осторожен.\nНа {percent}% ты закрытый.\nТы защищаешь себя."
+
+                user_relation_mode.remove(uid)
 
             else:
 
-                answers = user_test_answers[user_id]
-
-                a_count = sum(1 for x in answers if x in ["a", "а"])
-                b_count = len(answers) - a_count
-
-                if a_count > b_count:
-
-                    result = (
-                        "Ты человек, который сильно привязывается.\n"
-                        "Ты чувствуешь глубже, чем показываешь.\n"
-                        "Иногда боишься потерять тех, кто тебе дорог."
-                    )
-
+                if score >= 3:
+                    res = f"Ты очень эмоциональный.\nНа {percent}% ты про чувства.\nТы настоящий."
+                elif score >= 1:
+                    res = f"Ты баланс.\nНа {percent}% ты про эмоции.\nТы не поверхностный."
+                elif score <= -3:
+                    res = f"Ты закрытый.\nНа {100-percent}% ты про контроль.\nТы защищаешь себя."
                 else:
+                    res = f"Ты сложный.\nНа {percent}% тебя сложно понять.\nНо ты цепляешь."
 
-                    result = (
-                        "Ты держишь дистанцию.\n"
-                        "Не открываешься сразу и защищаешь себя.\n"
-                        "Но внутри ты глубже, чем кажешься."
-                    )
+            bot.send_message(m.chat.id, res)
 
-                bot.send_message(message.chat.id, result)
+            bot.send_message(
+                m.chat.id,
+                "Отправь это тому, кто думает что знает тебя 😈"
+            )
 
-                bot.send_message(
-                    message.chat.id,
-                    "Отправь это тому, кто думает, что знает тебя 😈"
-                )
+            bot.send_message(
+                m.chat.id,
+                "Что дальше?",
+                reply_markup=kb_menu()
+            )
 
-                del user_test_state[user_id]
-                del user_test_answers[user_id]
+            del user_test_state[uid]
+            del user_test_answers[uid]
+            return
 
-                return
-
-    # ===== ОБЫЧНЫЙ ЧАТ =====
+    # ===== AI ЧАТ =====
 
     try:
-
-        answer = get_openrouter_answer(user_id, text)
-
-        bot.send_message(message.chat.id, answer)
-
-        if sheet:
-            sheet.append_row([
-                str(datetime.now(KZ_TIMEZONE)),
-                str(user_id),
-                str(message.from_user.first_name or ""),
-                str(message.from_user.username or ""),
-                str(text),
-                str(answer),
-                "chat"
-            ])
-
-    except Exception as e:
-
-        print("Ошибка:", e)
-
-        bot.send_message(
-            message.chat.id,
-            "Ой... что-то пошло не так 😔"
-        )
-
-# ================= АВТОСООБЩЕНИЯ =================
-
-def auto_messages():
-    while True:
-
-        now = datetime.now(KZ_TIMEZONE)
-        hour = now.strftime("%H:%M")
-
-        if hour.startswith("09:00"):
-            for user in known_users:
-                try:
-                    bot.send_message(user, "Доброе утро ☀️ Я уже думаю о тебе ❤️")
-                except:
-                    pass
-            time.sleep(60)
-
-        if hour.startswith("22:00"):
-            for user in known_users:
-                try:
-                    bot.send_message(user, "Спокойной ночи 🌙")
-                except:
-                    pass
-            time.sleep(60)
-
-        time.sleep(20)
-
-threading.Thread(target=auto_messages, daemon=True).start()
+        answer = ai_answer(uid, text)
+        bot.send_message(m.chat.id, answer)
+    except:
+        bot.send_message(m.chat.id, "Ошибка 😔")
 
 # ================= WEBHOOK =================
 
 @app.route(f"/webhook/{TOKEN}", methods=["POST"])
 def webhook():
-    json_str = request.get_data().decode("UTF-8")
-    update = telebot.types.Update.de_json(json_str)
+    update = telebot.types.Update.de_json(request.get_data().decode("utf-8"))
     bot.process_new_updates([update])
-    return "OK", 200
+    return "ok"
 
 @app.route("/")
 def index():
-    return "Bot is running", 200
+    return "ok"
 
-# ================= ЗАПУСК =================
+# ================= RUN =================
 
 if __name__ == "__main__":
-
     bot.remove_webhook()
     bot.set_webhook(url=f"{RENDER_URL}/webhook/{TOKEN}")
-
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
