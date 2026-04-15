@@ -1,8 +1,8 @@
-telebot
+pyTelegramBotAPI
+flask
 gspread
 oauth2client
 requests
-flask
+pytz
 matplotlib
 praytimes
-pytz
