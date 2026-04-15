@@ -4,5 +4,5 @@ oauth2client
 requests
 flask
 matplotlib
-adhan
+praytimes
 pytz
