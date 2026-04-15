@@ -5,14 +5,14 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import requests
 from flask import Flask, request
-import qrcode
-from io import BytesIO
 from collections import defaultdict, deque
-from datetime import datetime
-import threading
+from datetime import datetime, timedelta
 import time
 import random
 import pytz
+import sqlite3
+import matplotlib.pyplot as plt
+from adhan import PrayerTimes, CalculationMethod, Coordinates
 
 # ================= НАСТРОЙКИ =================
 
@@ -23,6 +23,33 @@ CREDENTIALS_FILE = "/etc/secrets/credentials.json"
 RENDER_URL = "https://arman-c2rh.onrender.com"
 KZ_TIMEZONE = pytz.timezone("Asia/Almaty")
 
+# ================= DB =================
+
+conn = sqlite3.connect("namaz.db", check_same_thread=False)
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS prayers (
+    user_id INTEGER,
+    date TEXT,
+    fajr INTEGER,
+    dhuhr INTEGER,
+    asr INTEGER,
+    maghrib INTEGER,
+    isha INTEGER
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS streak (
+    user_id INTEGER PRIMARY KEY,
+    last_day TEXT,
+    count INTEGER
+)
+""")
+
+conn.commit()
+
 # ================= GOOGLE SHEETS =================
 
 scope = [
@@ -30,16 +57,11 @@ scope = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-sheet = None
-
-try:
-    creds = ServiceAccountCredentials.from_json_keyfile_name(
-        CREDENTIALS_FILE, scope
-    )
-    client = gspread.authorize(creds)
-    sheet = client.open("Zarina Answers").sheet1
-except Exception as e:
-    print("Sheets error:", e)
+creds = ServiceAccountCredentials.from_json_keyfile_name(
+    CREDENTIALS_FILE, scope
+)
+client = gspread.authorize(creds)
+sheet = client.open("Zarina Answers").sheet1
 
 # ================= TELEGRAM =================
 
@@ -47,216 +69,202 @@ bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
 user_histories = defaultdict(lambda: deque(maxlen=10))
-known_users = set()
 
-# ===== СОСТОЯНИЯ =====
+# ================= UI =================
 
-user_test_state = {}
-user_test_answers = {}
-user_relation_mode = set()
-
-# ===== КНОПКИ =====
-
-def kb_ab():
+def main_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("A", "B")
+    kb.add("🕌 Намаз", "💔 Отношения")
     return kb
 
-def kb_yesno():
+def namaz_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("Да", "Нет")
+    kb.add("Фаджр", "Зухр", "Аср")
+    kb.add("Магриб", "Иша")
+    kb.add("📊 Статистика", "📈 График")
+    kb.add("🏆 Рейтинг")
+    kb.add("⬅️ Назад")
     return kb
 
-def kb_menu():
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("🔁 Пройти ещё раз", "💔 Отношения")
-    return kb
+# ================= НАМАЗ ВРЕМЯ =================
 
-# ===== ВОПРОСЫ =====
+def get_prayer_times():
+    coordinates = Coordinates(43.238949, 76.889709)
+    date = datetime.now(KZ_TIMEZONE).date()
+    params = CalculationMethod.MUSLIM_WORLD_LEAGUE
 
-test_questions = [
-    "Ты чаще:\nA) привязываешься\nB) держишь дистанцию",
-    "Если человек тебе дорог:\nA) показываешь\nB) скрываешь",
-    "Ты бы простил измену?\nA) да\nB) нет",
-    "Ты больше:\nA) логика\nB) эмоции",
-    "Боишься потерять людей?\nA) да\nB) нет",
-    "Ты чаще страдаешь молча?\nA) да\nB) нет"
-]
+    times = PrayerTimes(coordinates, date, params)
 
-relation_questions = [
-    "В отношениях ты:\nA) любишь сильнее\nB) держишь баланс",
-    "Если человек отдаляется:\nA) догоняешь\nB) отпускаешь",
-    "Ты ревнивый?\nA) да\nB) нет",
-    "Проверяешь человека?\nA) да\nB) нет",
-    "Боишься быть брошенным?\nA) да\nB) нет"
-]
+    return {
+        "Фаджр": times.fajr,
+        "Зухр": times.dhuhr,
+        "Аср": times.asr,
+        "Магриб": times.maghrib,
+        "Иша": times.isha
+    }
 
-reaction_phrases = [
-    "Хм… неожиданно 👀",
-    "Ты не такой простой 😏",
-    "Интересный выбор...",
-    "Я начинаю тебя понимать",
-    "Это многое говорит о тебе"
-]
+# ================= ЛОГИКА =================
 
-# ================= OPENROUTER =================
+def update_prayer(user_id, prayer):
+    today = str(datetime.now(KZ_TIMEZONE).date())
+
+    cursor.execute("SELECT * FROM prayers WHERE user_id=? AND date=?", (user_id, today))
+    if not cursor.fetchone():
+        cursor.execute("INSERT INTO prayers VALUES (?, ?, 0,0,0,0,0)", (user_id, today))
+
+    cursor.execute(f"UPDATE prayers SET {prayer}=1 WHERE user_id=? AND date=?", (user_id, today))
+    conn.commit()
+
+def check_full_day(user_id):
+    today = str(datetime.now(KZ_TIMEZONE).date())
+    cursor.execute("""
+    SELECT fajr,dhuhr,asr,maghrib,isha FROM prayers
+    WHERE user_id=? AND date=?
+    """, (user_id, today))
+
+    row = cursor.fetchone()
+    return row and all(row)
+
+def update_streak(user_id):
+    today = datetime.now(KZ_TIMEZONE).date()
+    yesterday = today - timedelta(days=1)
+
+    cursor.execute("""
+    SELECT fajr,dhuhr,asr,maghrib,isha FROM prayers
+    WHERE user_id=? AND date=?
+    """, (user_id, str(yesterday)))
+
+    y = cursor.fetchone()
+
+    if not y or not all(y):
+        count = 1
+    else:
+        cursor.execute("SELECT count FROM streak WHERE user_id=?", (user_id,))
+        row = cursor.fetchone()
+        count = (row[0] if row else 0) + 1
+
+    cursor.execute("""
+    INSERT OR REPLACE INTO streak (user_id, last_day, count)
+    VALUES (?, ?, ?)
+    """, (user_id, str(today), count))
+
+    conn.commit()
+
+# ================= ГРАФИК =================
+
+def generate_chart(user_id):
+    cursor.execute("""
+    SELECT date, fajr+dhuhr+asr+maghrib+isha FROM prayers
+    WHERE user_id=? ORDER BY date DESC LIMIT 7
+    """, (user_id,))
+
+    data = cursor.fetchall()
+    data.reverse()
+
+    dates = [d[0] for d in data]
+    values = [d[1] for d in data]
+
+    plt.figure()
+    plt.plot(dates, values)
+    plt.xticks(rotation=45)
+
+    file = f"{user_id}.png"
+    plt.savefig(file)
+    plt.close()
+
+    return file
+
+# ================= РЕЙТИНГ =================
+
+def get_top():
+    cursor.execute("SELECT user_id, count FROM streak ORDER BY count DESC LIMIT 10")
+    return cursor.fetchall()
+
+# ================= AI =================
 
 def ai_answer(uid, text):
-
     user_histories[uid].append({"role": "user", "content": text})
-
-    messages = [{
-        "role": "system",
-        "content": (
-            "Ты дерзкий, тёплый и немного флиртующий. "
-            "Иногда ссылайся на прошлые сообщения. "
-            "Отвечай коротко (1-2 предложения)."
-        )
-    }] + list(user_histories[uid])
 
     r = requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
         headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
-        json={"model": "meta-llama/llama-3-8b-instruct", "messages": messages}
+        json={
+            "model": "meta-llama/llama-3-8b-instruct",
+            "messages": list(user_histories[uid])
+        }
     )
 
     ans = r.json()["choices"][0]["message"]["content"]
-    user_histories[uid].append({"role": "assistant", "content": ans})
     return ans
 
-# ================= START =================
+# ================= ОБРАБОТКА =================
 
 @bot.message_handler(commands=["start"])
 def start(m):
-
-    uid = m.from_user.id
-    known_users.add(uid)
-
-    bot.send_message(
-        m.chat.id,
-        "Я задам тебе 6 вопросов\nи скажу кто ты на самом деле 😏\n\nГотов?",
-        reply_markup=kb_yesno()
-    )
-
-    user_test_state[uid] = "start"
-
-# ================= ЛОГИКА =================
+    bot.send_message(m.chat.id, "Выбери режим 👇", reply_markup=main_menu())
 
 @bot.message_handler(func=lambda m: True)
 def msg(m):
-
     uid = m.from_user.id
-    text = (m.text or "").lower()
+    text = m.text
 
-    # ===== МЕНЮ =====
-
-    if text == "🔁 пройти ещё раз":
-        user_test_state[uid] = "start"
-        bot.send_message(m.chat.id, "Ещё раз? 😏", reply_markup=kb_yesno())
+    # ===== НАМАЗ =====
+    if text == "🕌 Намаз":
+        bot.send_message(m.chat.id, "Отмечай намазы 👇", reply_markup=namaz_menu())
         return
 
-    if text == "💔 отношения":
-        user_relation_mode.add(uid)
-        user_test_state[uid] = 0
-        user_test_answers[uid] = []
-        bot.send_message(m.chat.id, "Окей… давай честно 😏")
-        bot.send_message(m.chat.id, relation_questions[0], reply_markup=kb_ab())
+    if text == "⬅️ Назад":
+        bot.send_message(m.chat.id, "Главное меню", reply_markup=main_menu())
         return
 
-    # ===== ТЕСТ =====
+    mapping = {
+        "Фаджр": "fajr",
+        "Зухр": "dhuhr",
+        "Аср": "asr",
+        "Магриб": "maghrib",
+        "Иша": "isha"
+    }
 
-    if uid in user_test_state:
+    if text in mapping:
+        update_prayer(uid, mapping[text])
 
-        state = user_test_state[uid]
+        if check_full_day(uid):
+            update_streak(uid)
 
-        if state == "start":
+            today = str(datetime.now(KZ_TIMEZONE).date())
+            cursor.execute("""
+            SELECT fajr,dhuhr,asr,maghrib,isha FROM prayers
+            WHERE user_id=? AND date=?
+            """, (uid, today))
+            row = cursor.fetchone()
 
-            if text == "да":
-                user_test_state[uid] = 0
-                user_test_answers[uid] = []
-                bot.send_message(m.chat.id, test_questions[0], reply_markup=kb_ab())
-            else:
-                bot.send_message(m.chat.id, "Ладно… зря 😏")
-                del user_test_state[uid]
-            return
+            sheet.append_row([uid, today, *row])
 
-        if isinstance(state, int):
+            bot.send_message(m.chat.id, "🔥 Все 5 намазов! Засчитано")
+        else:
+            bot.send_message(m.chat.id, f"Отмечено: {text}")
+        return
 
-            if text not in ["a", "b", "а", "б"]:
-                return
+    if text == "📊 Статистика":
+        cursor.execute("SELECT count FROM streak WHERE user_id=?", (uid,))
+        row = cursor.fetchone()
+        bot.send_message(m.chat.id, f"🔥 Дней подряд: {row[0] if row else 0}")
+        return
 
-            user_test_answers[uid].append(text)
+    if text == "📈 График":
+        file = generate_chart(uid)
+        bot.send_photo(m.chat.id, open(file, "rb"))
+        return
 
-            next_q = state + 1
-            qs = relation_questions if uid in user_relation_mode else test_questions
+    if text == "🏆 Рейтинг":
+        top = get_top()
+        msg = "🏆 Топ:\n"
+        for i, (u, c) in enumerate(top, 1):
+            msg += f"{i}. {u} — {c}\n"
+        bot.send_message(m.chat.id, msg)
+        return
 
-            if next_q < len(qs):
-
-                user_test_state[uid] = next_q
-
-                bot.send_message(m.chat.id, random.choice(reaction_phrases))
-                time.sleep(0.7)
-
-                bot.send_message(m.chat.id, qs[next_q], reply_markup=kb_ab())
-                return
-
-            # ===== ВАУ ЭФФЕКТ =====
-
-            bot.send_chat_action(m.chat.id, "typing")
-            time.sleep(1.5)
-            bot.send_message(m.chat.id, "Интересно...")
-            time.sleep(1)
-            bot.send_chat_action(m.chat.id, "typing")
-            time.sleep(1.5)
-
-            answers = user_test_answers[uid]
-            a = sum(1 for x in answers if x in ["a","а"])
-            b = len(answers)-a
-            score = a-b
-
-            percent = int((a / len(answers)) * 100)
-
-            # ===== РЕЗУЛЬТАТ =====
-
-            if uid in user_relation_mode:
-
-                if a > b:
-                    res = f"Ты любишь сильнее.\nНа {percent}% ты эмоциональный.\nТы отдаёшь больше, чем получаешь."
-                else:
-                    res = f"Ты осторожен.\nНа {percent}% ты закрытый.\nТы защищаешь себя."
-
-                user_relation_mode.remove(uid)
-
-            else:
-
-                if score >= 3:
-                    res = f"Ты очень эмоциональный.\nНа {percent}% ты про чувства.\nТы настоящий."
-                elif score >= 1:
-                    res = f"Ты баланс.\nНа {percent}% ты про эмоции.\nТы не поверхностный."
-                elif score <= -3:
-                    res = f"Ты закрытый.\nНа {100-percent}% ты про контроль.\nТы защищаешь себя."
-                else:
-                    res = f"Ты сложный.\nНа {percent}% тебя сложно понять.\nНо ты цепляешь."
-
-            bot.send_message(m.chat.id, res)
-
-            bot.send_message(
-                m.chat.id,
-                "Отправь это тому, кто думает что знает тебя 😈"
-            )
-
-            bot.send_message(
-                m.chat.id,
-                "Что дальше?",
-                reply_markup=kb_menu()
-            )
-
-            del user_test_state[uid]
-            del user_test_answers[uid]
-            return
-
-    # ===== AI ЧАТ =====
-
+    # ===== AI =====
     try:
         answer = ai_answer(uid, text)
         bot.send_message(m.chat.id, answer)
