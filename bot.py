@@ -7,12 +7,10 @@ import requests
 from flask import Flask, request
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
-import time
-import random
 import pytz
 import sqlite3
 import matplotlib.pyplot as plt
-from adhan import PrayerTimes, CalculationMethod, Coordinates
+from praytimes import PrayTimes
 
 # ================= НАСТРОЙКИ =================
 
@@ -22,6 +20,11 @@ CREDENTIALS_FILE = "/etc/secrets/credentials.json"
 
 RENDER_URL = "https://arman-c2rh.onrender.com"
 KZ_TIMEZONE = pytz.timezone("Asia/Almaty")
+
+bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
+
+user_histories = defaultdict(lambda: deque(maxlen=10))
 
 # ================= DB =================
 
@@ -63,18 +66,11 @@ creds = ServiceAccountCredentials.from_json_keyfile_name(
 client = gspread.authorize(creds)
 sheet = client.open("Zarina Answers").sheet1
 
-# ================= TELEGRAM =================
-
-bot = telebot.TeleBot(TOKEN)
-app = Flask(__name__)
-
-user_histories = defaultdict(lambda: deque(maxlen=10))
-
 # ================= UI =================
 
 def main_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("🕌 Намаз", "💔 Отношения")
+    kb.add("🕌 Намаз", "💬 AI")
     return kb
 
 def namaz_menu():
@@ -86,24 +82,27 @@ def namaz_menu():
     kb.add("⬅️ Назад")
     return kb
 
-# ================= НАМАЗ ВРЕМЯ =================
+# ================= НАМАЗ =================
 
 def get_prayer_times():
-    coordinates = Coordinates(43.238949, 76.889709)
-    date = datetime.now(KZ_TIMEZONE).date()
-    params = CalculationMethod.MUSLIM_WORLD_LEAGUE
+    pt = PrayTimes('MWL')
+    now = datetime.now(KZ_TIMEZONE)
 
-    times = PrayerTimes(coordinates, date, params)
+    times = pt.getTimes(
+        (43.238949, 76.889709),
+        now,
+        5
+    )
 
     return {
-        "Фаджр": times.fajr,
-        "Зухр": times.dhuhr,
-        "Аср": times.asr,
-        "Магриб": times.maghrib,
-        "Иша": times.isha
+        "Фаджр": times["fajr"],
+        "Зухр": times["dhuhr"],
+        "Аср": times["asr"],
+        "Магриб": times["maghrib"],
+        "Иша": times["isha"]
     }
 
-# ================= ЛОГИКА =================
+# ================= ЛОГИКА НАМАЗА =================
 
 def update_prayer(user_id, prayer):
     today = str(datetime.now(KZ_TIMEZONE).date())
@@ -117,6 +116,7 @@ def update_prayer(user_id, prayer):
 
 def check_full_day(user_id):
     today = str(datetime.now(KZ_TIMEZONE).date())
+
     cursor.execute("""
     SELECT fajr,dhuhr,asr,maghrib,isha FROM prayers
     WHERE user_id=? AND date=?
@@ -127,12 +127,12 @@ def check_full_day(user_id):
 
 def update_streak(user_id):
     today = datetime.now(KZ_TIMEZONE).date()
-    yesterday = today - timedelta(days=1)
+    yesterday = str(today - timedelta(days=1))
 
     cursor.execute("""
     SELECT fajr,dhuhr,asr,maghrib,isha FROM prayers
     WHERE user_id=? AND date=?
-    """, (user_id, str(yesterday)))
+    """, (user_id, yesterday))
 
     y = cursor.fetchone()
 
@@ -174,12 +174,6 @@ def generate_chart(user_id):
 
     return file
 
-# ================= РЕЙТИНГ =================
-
-def get_top():
-    cursor.execute("SELECT user_id, count FROM streak ORDER BY count DESC LIMIT 10")
-    return cursor.fetchall()
-
 # ================= AI =================
 
 def ai_answer(uid, text):
@@ -194,10 +188,9 @@ def ai_answer(uid, text):
         }
     )
 
-    ans = r.json()["choices"][0]["message"]["content"]
-    return ans
+    return r.json()["choices"][0]["message"]["content"]
 
-# ================= ОБРАБОТКА =================
+# ================= HANDLERS =================
 
 @bot.message_handler(commands=["start"])
 def start(m):
@@ -208,9 +201,8 @@ def msg(m):
     uid = m.from_user.id
     text = m.text
 
-    # ===== НАМАЗ =====
     if text == "🕌 Намаз":
-        bot.send_message(m.chat.id, "Отмечай намазы 👇", reply_markup=namaz_menu())
+        bot.send_message(m.chat.id, "Меню намаза", reply_markup=namaz_menu())
         return
 
     if text == "⬅️ Назад":
@@ -236,11 +228,15 @@ def msg(m):
             SELECT fajr,dhuhr,asr,maghrib,isha FROM prayers
             WHERE user_id=? AND date=?
             """, (uid, today))
+
             row = cursor.fetchone()
 
-            sheet.append_row([uid, today, *row])
+            try:
+                sheet.append_row([uid, today, *row])
+            except:
+                pass
 
-            bot.send_message(m.chat.id, "🔥 Все 5 намазов! Засчитано")
+            bot.send_message(m.chat.id, "🔥 Все 5 намазов засчитаны!")
         else:
             bot.send_message(m.chat.id, f"Отмечено: {text}")
         return
@@ -248,7 +244,7 @@ def msg(m):
     if text == "📊 Статистика":
         cursor.execute("SELECT count FROM streak WHERE user_id=?", (uid,))
         row = cursor.fetchone()
-        bot.send_message(m.chat.id, f"🔥 Дней подряд: {row[0] if row else 0}")
+        bot.send_message(m.chat.id, f"🔥 Серия дней: {row[0] if row else 0}")
         return
 
     if text == "📈 График":
@@ -257,25 +253,30 @@ def msg(m):
         return
 
     if text == "🏆 Рейтинг":
-        top = get_top()
-        msg = "🏆 Топ:\n"
+        cursor.execute("SELECT user_id, count FROM streak ORDER BY count DESC LIMIT 10")
+        top = cursor.fetchall()
+
+        msg_text = "🏆 Топ:\n"
         for i, (u, c) in enumerate(top, 1):
-            msg += f"{i}. {u} — {c}\n"
-        bot.send_message(m.chat.id, msg)
+            msg_text += f"{i}. {u} — {c}\n"
+
+        bot.send_message(m.chat.id, msg_text)
         return
 
-    # ===== AI =====
+    # AI
     try:
         answer = ai_answer(uid, text)
         bot.send_message(m.chat.id, answer)
     except:
-        bot.send_message(m.chat.id, "Ошибка 😔")
+        bot.send_message(m.chat.id, "Ошибка AI")
 
 # ================= WEBHOOK =================
 
 @app.route(f"/webhook/{TOKEN}", methods=["POST"])
 def webhook():
-    update = telebot.types.Update.de_json(request.get_data().decode("utf-8"))
+    update = telebot.types.Update.de_json(
+        request.get_data().decode("utf-8")
+    )
     bot.process_new_updates([update])
     return "ok"
 
