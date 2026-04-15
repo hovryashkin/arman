@@ -11,25 +11,39 @@ import pytz
 import sqlite3
 import matplotlib.pyplot as plt
 from praytimes import PrayTimes
+import threading
+import time
 
-# ================= НАСТРОЙКИ =================
+# ================= CONFIG =================
 
 TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 CREDENTIALS_FILE = "/etc/secrets/credentials.json"
 
 RENDER_URL = "https://arman-c2rh.onrender.com"
-KZ_TIMEZONE = pytz.timezone("Asia/Almaty")
+KZ = pytz.timezone("Asia/Almaty")
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-user_histories = defaultdict(lambda: deque(maxlen=10))
+user_histories = defaultdict(lambda: deque(maxlen=8))
+
+# кеш времени намаза
+user_prayer_cache = {}
 
 # ================= DB =================
 
 conn = sqlite3.connect("namaz.db", check_same_thread=False)
 cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    lat REAL,
+    lng REAL,
+    ai INTEGER DEFAULT 1
+)
+""")
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS prayers (
@@ -71,112 +85,76 @@ sheet = client.open("Zarina Answers").sheet1
 def main_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("🕌 Намаз", "💬 AI")
+    kb.add("📍 Локация")
     return kb
 
 def namaz_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("Фаджр", "Зухр", "Аср")
     kb.add("Магриб", "Иша")
-    kb.add("📊 Статистика", "📈 График")
-    kb.add("🏆 Рейтинг")
     kb.add("⬅️ Назад")
     return kb
 
-# ================= НАМАЗ =================
+# ================= USER =================
 
-def get_prayer_times():
+def get_user_location(uid):
+    cursor.execute("SELECT lat,lng FROM users WHERE user_id=?", (uid,))
+    row = cursor.fetchone()
+    return row if row else (43.238949, 76.889709)
+
+# ================= NAMAZ ENGINE =================
+
+def calc_times(uid):
+    lat, lng = get_user_location(uid)
+
     pt = PrayTimes('MWL')
-    now = datetime.now(KZ_TIMEZONE)
+    now = datetime.now(KZ)
 
-    times = pt.getTimes(
-        (43.238949, 76.889709),
-        now,
-        5
-    )
+    times = pt.getTimes((lat, lng), now, 5)
 
     return {
-        "Фаджр": times["fajr"],
-        "Зухр": times["dhuhr"],
-        "Аср": times["asr"],
-        "Магриб": times["maghrib"],
-        "Иша": times["isha"]
+        "fajr": times["fajr"],
+        "dhuhr": times["dhuhr"],
+        "asr": times["asr"],
+        "maghrib": times["maghrib"],
+        "isha": times["isha"]
     }
 
-# ================= ЛОГИКА НАМАЗА =================
+def refresh_cache(uid):
+    user_prayer_cache[uid] = calc_times(uid)
 
-def update_prayer(user_id, prayer):
-    today = str(datetime.now(KZ_TIMEZONE).date())
+# ================= AUTO PRAYER NOTIFICATIONS =================
 
-    cursor.execute("SELECT * FROM prayers WHERE user_id=? AND date=?", (user_id, today))
-    if not cursor.fetchone():
-        cursor.execute("INSERT INTO prayers VALUES (?, ?, 0,0,0,0,0)", (user_id, today))
+def prayer_worker():
+    while True:
+        now = datetime.now(KZ)
 
-    cursor.execute(f"UPDATE prayers SET {prayer}=1 WHERE user_id=? AND date=?", (user_id, today))
-    conn.commit()
+        for uid in list(user_prayer_cache.keys()):
+            times = user_prayer_cache.get(uid)
+            if not times:
+                continue
 
-def check_full_day(user_id):
-    today = str(datetime.now(KZ_TIMEZONE).date())
+            for name, t in times.items():
+                try:
+                    pray_time = datetime.strptime(t, "%H:%M").replace(
+                        year=now.year, month=now.month, day=now.day
+                    )
 
-    cursor.execute("""
-    SELECT fajr,dhuhr,asr,maghrib,isha FROM prayers
-    WHERE user_id=? AND date=?
-    """, (user_id, today))
+                    diff = abs((pray_time - now).total_seconds())
 
-    row = cursor.fetchone()
-    return row and all(row)
+                    # отправка за 1 минуту
+                    if diff < 30:
+                        bot.send_message(uid, f"🕌 Время намаза: {name.upper()}")
+                except:
+                    continue
 
-def update_streak(user_id):
-    today = datetime.now(KZ_TIMEZONE).date()
-    yesterday = str(today - timedelta(days=1))
+        time.sleep(20)
 
-    cursor.execute("""
-    SELECT fajr,dhuhr,asr,maghrib,isha FROM prayers
-    WHERE user_id=? AND date=?
-    """, (user_id, yesterday))
-
-    y = cursor.fetchone()
-
-    if not y or not all(y):
-        count = 1
-    else:
-        cursor.execute("SELECT count FROM streak WHERE user_id=?", (user_id,))
-        row = cursor.fetchone()
-        count = (row[0] if row else 0) + 1
-
-    cursor.execute("""
-    INSERT OR REPLACE INTO streak (user_id, last_day, count)
-    VALUES (?, ?, ?)
-    """, (user_id, str(today), count))
-
-    conn.commit()
-
-# ================= ГРАФИК =================
-
-def generate_chart(user_id):
-    cursor.execute("""
-    SELECT date, fajr+dhuhr+asr+maghrib+isha FROM prayers
-    WHERE user_id=? ORDER BY date DESC LIMIT 7
-    """, (user_id,))
-
-    data = cursor.fetchall()
-    data.reverse()
-
-    dates = [d[0] for d in data]
-    values = [d[1] for d in data]
-
-    plt.figure()
-    plt.plot(dates, values)
-    plt.xticks(rotation=45)
-
-    file = f"{user_id}.png"
-    plt.savefig(file)
-    plt.close()
-
-    return file
+threading.Thread(target=prayer_worker, daemon=True).start()
 
 # ================= AI =================
 
-def ai_answer(uid, text):
+def ai(uid, text):
     user_histories[uid].append({"role": "user", "content": text})
 
     r = requests.post(
@@ -190,11 +168,49 @@ def ai_answer(uid, text):
 
     return r.json()["choices"][0]["message"]["content"]
 
+# ================= PRAYERS LOGIC =================
+
+def mark(uid, prayer):
+    today = str(datetime.now(KZ).date())
+
+    cursor.execute("SELECT * FROM prayers WHERE user_id=? AND date=?", (uid, today))
+    if not cursor.fetchone():
+        cursor.execute("INSERT INTO prayers VALUES (?, ?, 0,0,0,0,0)", (uid, today))
+
+    cursor.execute(f"UPDATE prayers SET {prayer}=1 WHERE user_id=? AND date=?", (uid, today))
+    conn.commit()
+
+def full(uid):
+    today = str(datetime.now(KZ).date())
+
+    cursor.execute("""
+    SELECT fajr,dhuhr,asr,maghrib,isha FROM prayers
+    WHERE user_id=? AND date=?
+    """, (uid, today))
+
+    row = cursor.fetchone()
+    return row and all(row)
+
 # ================= HANDLERS =================
 
 @bot.message_handler(commands=["start"])
 def start(m):
-    bot.send_message(m.chat.id, "Выбери режим 👇", reply_markup=main_menu())
+    bot.send_message(m.chat.id, "Бот активен", reply_markup=main_menu())
+
+@bot.message_handler(content_types=["location"])
+def location(m):
+    uid = m.from_user.id
+
+    cursor.execute("""
+    INSERT OR REPLACE INTO users (user_id, lat, lng)
+    VALUES (?, ?, ?)
+    """, (uid, m.location.latitude, m.location.longitude))
+
+    conn.commit()
+
+    refresh_cache(uid)
+
+    bot.send_message(m.chat.id, "📍 Локация обновлена и намаз активирован")
 
 @bot.message_handler(func=lambda m: True)
 def msg(m):
@@ -202,11 +218,16 @@ def msg(m):
     text = m.text
 
     if text == "🕌 Намаз":
-        bot.send_message(m.chat.id, "Меню намаза", reply_markup=namaz_menu())
+        refresh_cache(uid)
+        bot.send_message(m.chat.id, "Меню", reply_markup=namaz_menu())
         return
 
     if text == "⬅️ Назад":
         bot.send_message(m.chat.id, "Главное меню", reply_markup=main_menu())
+        return
+
+    if text == "📍 Локация":
+        bot.send_message(m.chat.id, "Отправь геолокацию")
         return
 
     mapping = {
@@ -218,57 +239,17 @@ def msg(m):
     }
 
     if text in mapping:
-        update_prayer(uid, mapping[text])
+        mark(uid, mapping[text])
 
-        if check_full_day(uid):
-            update_streak(uid)
+        if full(uid):
+            bot.send_message(m.chat.id, "🔥 Все намазы засчитаны!")
 
-            today = str(datetime.now(KZ_TIMEZONE).date())
-            cursor.execute("""
-            SELECT fajr,dhuhr,asr,maghrib,isha FROM prayers
-            WHERE user_id=? AND date=?
-            """, (uid, today))
-
-            row = cursor.fetchone()
-
-            try:
-                sheet.append_row([uid, today, *row])
-            except:
-                pass
-
-            bot.send_message(m.chat.id, "🔥 Все 5 намазов засчитаны!")
-        else:
-            bot.send_message(m.chat.id, f"Отмечено: {text}")
         return
 
-    if text == "📊 Статистика":
-        cursor.execute("SELECT count FROM streak WHERE user_id=?", (uid,))
-        row = cursor.fetchone()
-        bot.send_message(m.chat.id, f"🔥 Серия дней: {row[0] if row else 0}")
-        return
-
-    if text == "📈 График":
-        file = generate_chart(uid)
-        bot.send_photo(m.chat.id, open(file, "rb"))
-        return
-
-    if text == "🏆 Рейтинг":
-        cursor.execute("SELECT user_id, count FROM streak ORDER BY count DESC LIMIT 10")
-        top = cursor.fetchall()
-
-        msg_text = "🏆 Топ:\n"
-        for i, (u, c) in enumerate(top, 1):
-            msg_text += f"{i}. {u} — {c}\n"
-
-        bot.send_message(m.chat.id, msg_text)
-        return
-
-    # AI
     try:
-        answer = ai_answer(uid, text)
-        bot.send_message(m.chat.id, answer)
+        bot.send_message(m.chat.id, ai(uid, text))
     except:
-        bot.send_message(m.chat.id, "Ошибка AI")
+        bot.send_message(m.chat.id, "AI error")
 
 # ================= WEBHOOK =================
 
