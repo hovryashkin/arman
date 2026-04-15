@@ -4,5 +4,6 @@ gspread
 oauth2client
 requests
 pytz
-matplotlib
+matplotlib==3.8.4
 praytimes
+psycopg2-binary
