@@ -1,6 +1,8 @@
-python-telegram-bot==20.7
+telebot
 gspread
 oauth2client
+requests
+flask
 matplotlib
 adhan
-python-dotenv
+pytz
