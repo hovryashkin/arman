@@ -1,301 +1,184 @@
 import os
 import telebot
 from telebot import types
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 import requests
 from flask import Flask, request
-from collections import defaultdict, deque
 from datetime import datetime, timedelta
-import pytz
-import sqlite3
 import threading
 import time
-from praytimes import PrayTimes
-from apscheduler.schedulers.background import BackgroundScheduler
+import pytz
 
-# ================= CONFIG =================
+# ================= НАСТРОЙКИ =================
 
 TOKEN = os.getenv("BOT_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+CREDENTIALS_FILE = "/etc/secrets/credentials.json"
+RENDER_URL = "https://arman-c2rh.onrender.com"
 
-RENDER_URL = os.getenv("RENDER_URL", "https://your-app.onrender.com")
-KZ = pytz.timezone("Asia/Almaty")
+# API для времени намаза (Метод 2 - ISNA, можно менять)
+PRAYER_API_URL = "https://api.aladhan.com/v1/timings"
+
+# ================= GOOGLE SHEETS (БАЗА ДАННЫХ) =================
+
+scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+sheet = None
+
+def get_sheet():
+    global sheet
+    try:
+        creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+        client = gspread.authorize(creds)
+        sheet = client.open("Zarina Answers").sheet1
+        return sheet
+    except Exception as e:
+        print("Ошибка Google Sheets:", e)
+        return None
+
+# ================= КОНТЕНТ =================
+
+MORNING_CONTENT = [
+    "Дуа утром: 'Аллахумма бика асбахна...' (О Аллах, благодаря Тебе мы дожили до утра).",
+    "История: Посланник Аллаха ﷺ всегда начинал день с поминания Всевышнего."
+]
+
+EVENING_CONTENT = [
+    "Дуа вечером: 'Аллахумма бика амсайна...' (О Аллах, благодаря Тебе мы дожили до вечера).",
+    "История: Пророк ﷺ советовал читать последние суры Корана перед сном для защиты."
+]
+
+# ================= ЛОГИКА ВРЕМЕНИ =================
+
+def get_prayer_times(lat, lon):
+    try:
+        # Получаем данные на сегодня
+        resp = requests.get(f"{PRAYER_API_URL}?latitude={lat}&longitude={lon}&method=2").json()
+        return resp['data']['timings']
+    except:
+        return None
+
+# ================= TELEGRAM BOT =================
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-user_hist = defaultdict(lambda: deque(maxlen=8))
-user_cache = {}
-
-# ================= DB (SQLite fallback) =================
-
-conn = sqlite3.connect("bot.db", check_same_thread=False)
-cursor = conn.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    lat REAL,
-    lng REAL
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS prayers (
-    user_id INTEGER,
-    date TEXT,
-    fajr INT DEFAULT 0,
-    dhuhr INT DEFAULT 0,
-    asr INT DEFAULT 0,
-    maghrib INT DEFAULT 0,
-    isha INT DEFAULT 0
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS streak (
-    user_id INTEGER PRIMARY KEY,
-    count INTEGER DEFAULT 0
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS reminders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    text TEXT,
-    time TEXT,
-    sent INT DEFAULT 0
-)
-""")
-
-conn.commit()
-
-# ================= UI =================
-
-def menu():
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("🕌 Намаз", "🤖 AI")
-    kb.add("📍 Локация", "⏰ Напоминание")
+def kb_location():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add(types.KeyboardButton("📍 Отправить местоположение", request_location=True))
     return kb
 
-def namaz_menu():
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("Фаджр", "Зухр", "Аср")
-    kb.add("Магриб", "Иша")
-    kb.add("⬅️ Назад")
+def kb_done(prayer_name):
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("✅ Выполнено", callback_data=f"done_{prayer_name}"))
     return kb
-
-# ================= USER =================
-
-def get_loc(uid):
-    cursor.execute("SELECT lat,lng FROM users WHERE user_id=?", (uid,))
-    row = cursor.fetchone()
-    return row if row else (43.238949, 76.889709)
-
-# ================= NAMAZ =================
-
-def calc_times(uid):
-    lat, lng = get_loc(uid)
-
-    pt = PrayTimes('MWL')
-    now = datetime.now(KZ)
-
-    t = pt.getTimes((lat, lng), now, 5)
-
-    return t
-
-# ================= PRAY LOGIC =================
-
-def mark(uid, p):
-    today = str(datetime.now(KZ).date())
-
-    cursor.execute("""
-    INSERT OR IGNORE INTO prayers (user_id,date,fajr,dhuhr,asr,maghrib,isha)
-    VALUES (?,?,?,?,?,?,?)
-    """, (uid, today, 0,0,0,0,0))
-
-    cursor.execute(f"""
-    UPDATE prayers SET {p}=1
-    WHERE user_id=? AND date=?
-    """, (uid, today))
-
-    conn.commit()
-
-def full(uid):
-    today = str(datetime.now(KZ).date())
-
-    cursor.execute("""
-    SELECT fajr,dhuhr,asr,maghrib,isha
-    FROM prayers WHERE user_id=? AND date=?
-    """, (uid, today))
-
-    r = cursor.fetchone()
-    return r and all(r)
-
-# ================= AI =================
-
-def ai(uid, text):
-    user_hist[uid].append({"role": "user", "content": text})
-
-    r = requests.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
-        json={
-            "model": "meta-llama/llama-3-8b-instruct",
-            "messages": list(user_hist[uid])
-        }
-    )
-
-    return r.json()["choices"][0]["message"]["content"]
-
-# ================= REMINDERS =================
-
-def reminder_worker():
-    while True:
-        now = datetime.now(KZ)
-
-        cursor.execute("""
-        SELECT id,user_id,text,time FROM reminders WHERE sent=0
-        """)
-
-        rows = cursor.fetchall()
-
-        for r in rows:
-            try:
-                t = datetime.strptime(r[3], "%Y-%m-%d %H:%M")
-
-                if abs((t - now).total_seconds()) < 20:
-                    bot.send_message(r[1], f"⏰ {r[2]}")
-                    cursor.execute("UPDATE reminders SET sent=1 WHERE id=?", (r[0],))
-                    conn.commit()
-            except:
-                pass
-
-        time.sleep(15)
-
-threading.Thread(target=reminder_worker, daemon=True).start()
-
-# ================= PRAYER AUTO =================
-
-scheduler = BackgroundScheduler()
-
-def auto_prayer():
-    cursor.execute("SELECT user_id FROM users")
-    users = cursor.fetchall()
-
-    for (uid,) in users:
-        try:
-            t = calc_times(uid)
-            now = datetime.now(KZ)
-
-            for name, val in t.items():
-                try:
-                    dt = datetime.strptime(val, "%H:%M").replace(
-                        year=now.year, month=now.month, day=now.day
-                    )
-
-                    if abs((dt - now).total_seconds()) < 40:
-                        bot.send_message(uid, f"🕌 {name.upper()}")
-                except:
-                    pass
-        except:
-            pass
-
-scheduler.add_job(auto_prayer, "interval", seconds=30)
-scheduler.start()
-
-# ================= HANDLERS =================
 
 @bot.message_handler(commands=["start"])
 def start(m):
-    bot.send_message(m.chat.id, "v3 бот активен", reply_markup=menu())
+    bot.send_message(
+        m.chat.id,
+        "Ассаляму алейкум! Я буду помогать вам соблюдать время намаза.\n"
+        "Для начала мне нужно знать вашу локацию, чтобы рассчитать точное время.",
+        reply_markup=kb_location()
+    )
 
 @bot.message_handler(content_types=["location"])
-def loc(m):
-    uid = m.from_user.id
+def handle_location(m):
+    uid = str(m.from_user.id)
+    lat = m.location.latitude
+    lon = m.location.longitude
+    
+    # Сохраняем в таблицу (ID, Lat, Lon, TZ, Count, Last, Date)
+    s = get_sheet()
+    cell = s.find(uid)
+    
+    if cell:
+        s.update_cell(cell.row, 2, lat)
+        s.update_cell(cell.row, 3, lon)
+    else:
+        s.append_row([uid, lat, lon, "Asia/Almaty", 0, "", ""])
 
-    cursor.execute("""
-    INSERT OR REPLACE INTO users (user_id,lat,lng)
-    VALUES (?,?,?)
-    """, (uid, m.location.latitude, m.location.longitude))
+    times = get_prayer_times(lat, lon)
+    if times:
+        text = "🕌 Расписание на сегодня:\n"
+        for name, t in times.items():
+            if name in ['Fajr', 'Dhuhr', 'Asr', 'Maghrib', 'Isha']:
+                text += f"**{name}**: {t}\n"
+        bot.send_message(m.chat.id, text, parse_mode="Markdown")
+        bot.send_message(m.chat.id, "Я буду присылать уведомления. Не забудьте отмечать выполненные!")
 
-    conn.commit()
+# ================= ОБРАБОТКА НАЖАТИЯ «ВЫПОЛНЕНО» =================
 
-    bot.send_message(m.chat.id, "📍 Локация сохранена")
+@bot.callback_query_handler(func=lambda call: call.data.startswith("done_"))
+def prayer_done(call):
+    uid = str(call.from_user.id)
+    s = get_sheet()
+    cell = s.find(uid)
+    
+    if cell:
+        current_count = int(s.cell(cell.row, 5).value or 0)
+        new_count = current_count + 1
+        s.update_cell(cell.row, 5, new_count)
+        
+        bot.answer_callback_query(call.id, "МашаАллах! Засчитано.")
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=f"{call.message.text}\n\n✅ Отмечено! Всего выполнено: {new_count}"
+        )
 
-@bot.message_handler(func=lambda m: True)
-def msg(m):
-    uid = m.from_user.id
-    text = m.text
+# ================= ФОНОВЫЕ УВЕДОМЛЕНИЯ =================
 
-    if text == "🕌 Намаз":
-        bot.send_message(m.chat.id, "Меню", reply_markup=namaz_menu())
-        return
-
-    if text == "⬅️ Назад":
-        bot.send_message(m.chat.id, "Меню", reply_markup=menu())
-        return
-
-    if text == "📍 Локация":
-        bot.send_message(m.chat.id, "Отправь геолокацию")
-        return
-
-    if text == "⏰ Напоминание":
-        bot.send_message(m.chat.id, "Формат: /rem 2026-04-15 18:30 текст")
-        return
-
-    if text.startswith("/rem"):
+def notification_loop():
+    while True:
         try:
-            _, d, t, *txt = text.split()
-            txt = " ".join(txt)
+            s = get_sheet()
+            all_users = s.get_all_records()
+            now = datetime.now(pytz.timezone("Asia/Almaty")).strftime("%H:%M")
+            date_today = datetime.now(pytz.timezone("Asia/Almaty")).strftime("%Y-%m-%d")
 
-            cursor.execute("""
-            INSERT INTO reminders (user_id,text,time)
-            VALUES (?,?,?)
-            """, (uid, txt, f"{d} {t}"))
+            for user in all_users:
+                uid = user['User ID']
+                lat, lon = user['Lat'], user['Lon']
+                
+                times = get_prayer_times(lat, lon)
+                if not times: continue
 
-            conn.commit()
-            bot.send_message(m.chat.id, "⏰ добавлено")
-        except:
-            bot.send_message(m.chat.id, "ошибка")
-        return
+                # Проверка времени намаза
+                for p_name in ['Fajr', 'Dhuhr', 'Asr', 'Maghrib', 'Isha']:
+                    if times[p_name] == now:
+                        # Чтобы не спамить в ту же минуту, проверяем дату/название
+                        if user['Last Prayer Name'] != p_name or user['Last Date'] != date_today:
+                            bot.send_message(uid, f"📢 Время намаза: {p_name} ({times[p_name]})", reply_markup=kb_done(p_name))
+                            
+                            # Обновляем статус в таблице, что уведомили
+                            cell = s.find(str(uid))
+                            s.update_cell(cell.row, 6, p_name)
+                            s.update_cell(cell.row, 7, date_today)
 
-    mapping = {
-        "Фаджр": "fajr",
-        "Зухр": "dhuhr",
-        "Аср": "asr",
-        "Магриб": "maghrib",
-        "Иша": "isha"
-    }
+                # Утренние/Вечерние истории (например в 08:00 и 20:00)
+                if now == "08:00":
+                    bot.send_message(uid, f"🌅 {random.choice(MORNING_CONTENT)}")
+                if now == "20:00":
+                    bot.send_message(uid, f"🌙 {random.choice(EVENING_CONTENT)}")
 
-    if text in mapping:
-        mark(uid, mapping[text])
+        except Exception as e:
+            print("Ошибка в цикле уведомлений:", e)
+        
+        time.sleep(60) # Проверка каждую минуту
 
-        if full(uid):
-            bot.send_message(m.chat.id, "🔥 все намазы выполнены")
+# Запуск потока уведомлений
+threading.Thread(target=notification_loop, daemon=True).start()
 
-        return
-
-    try:
-        bot.send_message(m.chat.id, ai(uid, text))
-    except:
-        bot.send_message(m.chat.id, "AI error")
-
-# ================= WEBHOOK =================
+# ================= WEBHOOK И ЗАПУСК =================
 
 @app.route(f"/webhook/{TOKEN}", methods=["POST"])
 def webhook():
-    update = telebot.types.Update.de_json(
-        request.get_data().decode("utf-8")
-    )
+    update = telebot.types.Update.de_json(request.get_data().decode("utf-8"))
     bot.process_new_updates([update])
     return "ok"
 
 @app.route("/")
-def index():
-    return "ok"
-
-# ================= RUN =================
+def index(): return "Бот работает"
 
 if __name__ == "__main__":
     bot.remove_webhook()
