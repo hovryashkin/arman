@@ -1,47 +1,41 @@
 import os
 import telebot
 from telebot import types
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 import requests
 from flask import Flask, request
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
 import pytz
 import sqlite3
-import matplotlib.pyplot as plt
-from praytimes import PrayTimes
 import threading
 import time
+from praytimes import PrayTimes
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # ================= CONFIG =================
 
 TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-CREDENTIALS_FILE = "/etc/secrets/credentials.json"
 
-RENDER_URL = "https://arman-c2rh.onrender.com"
+RENDER_URL = os.getenv("RENDER_URL", "https://your-app.onrender.com")
 KZ = pytz.timezone("Asia/Almaty")
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-user_histories = defaultdict(lambda: deque(maxlen=8))
+user_hist = defaultdict(lambda: deque(maxlen=8))
+user_cache = {}
 
-# кеш времени намаза
-user_prayer_cache = {}
+# ================= DB (SQLite fallback) =================
 
-# ================= DB =================
-
-conn = sqlite3.connect("namaz.db", check_same_thread=False)
+conn = sqlite3.connect("bot.db", check_same_thread=False)
 cursor = conn.cursor()
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
     lat REAL,
-    lng REAL,
-    ai INTEGER DEFAULT 1
+    lng REAL
 )
 """)
 
@@ -49,43 +43,39 @@ cursor.execute("""
 CREATE TABLE IF NOT EXISTS prayers (
     user_id INTEGER,
     date TEXT,
-    fajr INTEGER,
-    dhuhr INTEGER,
-    asr INTEGER,
-    maghrib INTEGER,
-    isha INTEGER
+    fajr INT DEFAULT 0,
+    dhuhr INT DEFAULT 0,
+    asr INT DEFAULT 0,
+    maghrib INT DEFAULT 0,
+    isha INT DEFAULT 0
 )
 """)
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS streak (
     user_id INTEGER PRIMARY KEY,
-    last_day TEXT,
-    count INTEGER
+    count INTEGER DEFAULT 0
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    text TEXT,
+    time TEXT,
+    sent INT DEFAULT 0
 )
 """)
 
 conn.commit()
 
-# ================= GOOGLE SHEETS =================
-
-scope = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
-
-creds = ServiceAccountCredentials.from_json_keyfile_name(
-    CREDENTIALS_FILE, scope
-)
-client = gspread.authorize(creds)
-sheet = client.open("Zarina Answers").sheet1
-
 # ================= UI =================
 
-def main_menu():
+def menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("🕌 Намаз", "💬 AI")
-    kb.add("📍 Локация")
+    kb.add("🕌 Намаз", "🤖 AI")
+    kb.add("📍 Локация", "⏰ Напоминание")
     return kb
 
 def namaz_menu():
@@ -97,120 +87,141 @@ def namaz_menu():
 
 # ================= USER =================
 
-def get_user_location(uid):
+def get_loc(uid):
     cursor.execute("SELECT lat,lng FROM users WHERE user_id=?", (uid,))
     row = cursor.fetchone()
     return row if row else (43.238949, 76.889709)
 
-# ================= NAMAZ ENGINE =================
+# ================= NAMAZ =================
 
 def calc_times(uid):
-    lat, lng = get_user_location(uid)
+    lat, lng = get_loc(uid)
 
     pt = PrayTimes('MWL')
     now = datetime.now(KZ)
 
-    times = pt.getTimes((lat, lng), now, 5)
+    t = pt.getTimes((lat, lng), now, 5)
 
-    return {
-        "fajr": times["fajr"],
-        "dhuhr": times["dhuhr"],
-        "asr": times["asr"],
-        "maghrib": times["maghrib"],
-        "isha": times["isha"]
-    }
+    return t
 
-def refresh_cache(uid):
-    user_prayer_cache[uid] = calc_times(uid)
+# ================= PRAY LOGIC =================
 
-# ================= AUTO PRAYER NOTIFICATIONS =================
-
-def prayer_worker():
-    while True:
-        now = datetime.now(KZ)
-
-        for uid in list(user_prayer_cache.keys()):
-            times = user_prayer_cache.get(uid)
-            if not times:
-                continue
-
-            for name, t in times.items():
-                try:
-                    pray_time = datetime.strptime(t, "%H:%M").replace(
-                        year=now.year, month=now.month, day=now.day
-                    )
-
-                    diff = abs((pray_time - now).total_seconds())
-
-                    # отправка за 1 минуту
-                    if diff < 30:
-                        bot.send_message(uid, f"🕌 Время намаза: {name.upper()}")
-                except:
-                    continue
-
-        time.sleep(20)
-
-threading.Thread(target=prayer_worker, daemon=True).start()
-
-# ================= AI =================
-
-def ai(uid, text):
-    user_histories[uid].append({"role": "user", "content": text})
-
-    r = requests.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
-        json={
-            "model": "meta-llama/llama-3-8b-instruct",
-            "messages": list(user_histories[uid])
-        }
-    )
-
-    return r.json()["choices"][0]["message"]["content"]
-
-# ================= PRAYERS LOGIC =================
-
-def mark(uid, prayer):
+def mark(uid, p):
     today = str(datetime.now(KZ).date())
 
-    cursor.execute("SELECT * FROM prayers WHERE user_id=? AND date=?", (uid, today))
-    if not cursor.fetchone():
-        cursor.execute("INSERT INTO prayers VALUES (?, ?, 0,0,0,0,0)", (uid, today))
+    cursor.execute("""
+    INSERT OR IGNORE INTO prayers (user_id,date,fajr,dhuhr,asr,maghrib,isha)
+    VALUES (?,?,?,?,?,?,?)
+    """, (uid, today, 0,0,0,0,0))
 
-    cursor.execute(f"UPDATE prayers SET {prayer}=1 WHERE user_id=? AND date=?", (uid, today))
+    cursor.execute(f"""
+    UPDATE prayers SET {p}=1
+    WHERE user_id=? AND date=?
+    """, (uid, today))
+
     conn.commit()
 
 def full(uid):
     today = str(datetime.now(KZ).date())
 
     cursor.execute("""
-    SELECT fajr,dhuhr,asr,maghrib,isha FROM prayers
-    WHERE user_id=? AND date=?
+    SELECT fajr,dhuhr,asr,maghrib,isha
+    FROM prayers WHERE user_id=? AND date=?
     """, (uid, today))
 
-    row = cursor.fetchone()
-    return row and all(row)
+    r = cursor.fetchone()
+    return r and all(r)
+
+# ================= AI =================
+
+def ai(uid, text):
+    user_hist[uid].append({"role": "user", "content": text})
+
+    r = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+        json={
+            "model": "meta-llama/llama-3-8b-instruct",
+            "messages": list(user_hist[uid])
+        }
+    )
+
+    return r.json()["choices"][0]["message"]["content"]
+
+# ================= REMINDERS =================
+
+def reminder_worker():
+    while True:
+        now = datetime.now(KZ)
+
+        cursor.execute("""
+        SELECT id,user_id,text,time FROM reminders WHERE sent=0
+        """)
+
+        rows = cursor.fetchall()
+
+        for r in rows:
+            try:
+                t = datetime.strptime(r[3], "%Y-%m-%d %H:%M")
+
+                if abs((t - now).total_seconds()) < 20:
+                    bot.send_message(r[1], f"⏰ {r[2]}")
+                    cursor.execute("UPDATE reminders SET sent=1 WHERE id=?", (r[0],))
+                    conn.commit()
+            except:
+                pass
+
+        time.sleep(15)
+
+threading.Thread(target=reminder_worker, daemon=True).start()
+
+# ================= PRAYER AUTO =================
+
+scheduler = BackgroundScheduler()
+
+def auto_prayer():
+    cursor.execute("SELECT user_id FROM users")
+    users = cursor.fetchall()
+
+    for (uid,) in users:
+        try:
+            t = calc_times(uid)
+            now = datetime.now(KZ)
+
+            for name, val in t.items():
+                try:
+                    dt = datetime.strptime(val, "%H:%M").replace(
+                        year=now.year, month=now.month, day=now.day
+                    )
+
+                    if abs((dt - now).total_seconds()) < 40:
+                        bot.send_message(uid, f"🕌 {name.upper()}")
+                except:
+                    pass
+        except:
+            pass
+
+scheduler.add_job(auto_prayer, "interval", seconds=30)
+scheduler.start()
 
 # ================= HANDLERS =================
 
 @bot.message_handler(commands=["start"])
 def start(m):
-    bot.send_message(m.chat.id, "Бот активен", reply_markup=main_menu())
+    bot.send_message(m.chat.id, "v3 бот активен", reply_markup=menu())
 
 @bot.message_handler(content_types=["location"])
-def location(m):
+def loc(m):
     uid = m.from_user.id
 
     cursor.execute("""
-    INSERT OR REPLACE INTO users (user_id, lat, lng)
-    VALUES (?, ?, ?)
+    INSERT OR REPLACE INTO users (user_id,lat,lng)
+    VALUES (?,?,?)
     """, (uid, m.location.latitude, m.location.longitude))
 
     conn.commit()
 
-    refresh_cache(uid)
-
-    bot.send_message(m.chat.id, "📍 Локация обновлена и намаз активирован")
+    bot.send_message(m.chat.id, "📍 Локация сохранена")
 
 @bot.message_handler(func=lambda m: True)
 def msg(m):
@@ -218,16 +229,35 @@ def msg(m):
     text = m.text
 
     if text == "🕌 Намаз":
-        refresh_cache(uid)
         bot.send_message(m.chat.id, "Меню", reply_markup=namaz_menu())
         return
 
     if text == "⬅️ Назад":
-        bot.send_message(m.chat.id, "Главное меню", reply_markup=main_menu())
+        bot.send_message(m.chat.id, "Меню", reply_markup=menu())
         return
 
     if text == "📍 Локация":
         bot.send_message(m.chat.id, "Отправь геолокацию")
+        return
+
+    if text == "⏰ Напоминание":
+        bot.send_message(m.chat.id, "Формат: /rem 2026-04-15 18:30 текст")
+        return
+
+    if text.startswith("/rem"):
+        try:
+            _, d, t, *txt = text.split()
+            txt = " ".join(txt)
+
+            cursor.execute("""
+            INSERT INTO reminders (user_id,text,time)
+            VALUES (?,?,?)
+            """, (uid, txt, f"{d} {t}"))
+
+            conn.commit()
+            bot.send_message(m.chat.id, "⏰ добавлено")
+        except:
+            bot.send_message(m.chat.id, "ошибка")
         return
 
     mapping = {
@@ -242,7 +272,7 @@ def msg(m):
         mark(uid, mapping[text])
 
         if full(uid):
-            bot.send_message(m.chat.id, "🔥 Все намазы засчитаны!")
+            bot.send_message(m.chat.id, "🔥 все намазы выполнены")
 
         return
 
