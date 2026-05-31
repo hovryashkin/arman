@@ -2,70 +2,78 @@ import os
 import re
 import pytz
 import time
+import sqlite3
 import threading
-import gspread
 from datetime import datetime, timedelta
 from flask import Flask, request
 from telebot import telebot, types
-from oauth2client.service_account import ServiceAccountCredentials
 
 # ================= НАСТРОЙКИ =================
 
 TOKEN = os.getenv("BOT_TOKEN")
-CREDENTIALS_FILE = "/etc/secrets/credentials.json"
-RENDER_URL = os.getenv("RENDER_URL", "https://your-app.onrender.com")
+RENDER_URL = os.getenv("RENDER_URL", "https://arman-c2rh.onrender.com")
+DB_PATH = "finance.db"
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-# ================= GOOGLE SHEETS =================
+# ================= БАЗА ДАННЫХ =================
 
-SCOPE = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+def get_conn():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-SHEET_USERS = "Users"
-SHEET_TX = "Transactions"
-SHEET_BUDGETS = "Budgets"
-SHEET_GOALS = "Goals"
+def init_db():
+    with get_conn() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                username TEXT,
+                currency TEXT DEFAULT '₸',
+                daily_reminder TEXT DEFAULT 'off',
+                joined TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
+                date TEXT,
+                type TEXT,
+                amount REAL,
+                category TEXT,
+                note TEXT,
+                month INTEGER,
+                year INTEGER
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS budgets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
+                category TEXT,
+                limit_amount REAL,
+                month INTEGER,
+                year INTEGER,
+                UNIQUE(user_id, category, month, year)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS goals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
+                name TEXT,
+                target REAL,
+                saved REAL DEFAULT 0,
+                currency TEXT,
+                created TEXT,
+                done INTEGER DEFAULT 0
+            )
+        """)
+        conn.commit()
 
-def get_client():
-    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, SCOPE)
-    return gspread.authorize(creds)
-
-def get_spreadsheet():
-    client = get_client()
-    return client.open("FinanceBot")
-
-def get_sheet(name):
-    try:
-        return get_spreadsheet().worksheet(name)
-    except Exception as e:
-        print(f"Ошибка получения листа {name}: {e}")
-        return None
-
-def ensure_sheets():
-    """Создаёт нужные листы если их нет"""
-    try:
-        ss = get_spreadsheet()
-        existing = [ws.title for ws in ss.worksheets()]
-
-        if SHEET_USERS not in existing:
-            ws = ss.add_worksheet(SHEET_USERS, rows=1000, cols=10)
-            ws.append_row(["user_id", "username", "currency", "timezone", "daily_reminder", "joined"])
-
-        if SHEET_TX not in existing:
-            ws = ss.add_worksheet(SHEET_TX, rows=10000, cols=8)
-            ws.append_row(["user_id", "date", "type", "amount", "category", "note", "month", "year"])
-
-        if SHEET_BUDGETS not in existing:
-            ws = ss.add_worksheet(SHEET_BUDGETS, rows=1000, cols=5)
-            ws.append_row(["user_id", "category", "limit_amount", "month", "year"])
-
-        if SHEET_GOALS not in existing:
-            ws = ss.add_worksheet(SHEET_GOALS, rows=1000, cols=7)
-            ws.append_row(["user_id", "name", "target", "saved", "currency", "created", "done"])
-
-    except Exception as e:
-        print(f"Ошибка ensure_sheets: {e}")
+init_db()
 
 # ================= КАТЕГОРИИ =================
 
@@ -98,48 +106,66 @@ CATEGORY_EMOJIS = {
 
 # ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
 
-user_state = {}  # Хранит текущее состояние пользователя
+user_state = {}
 
-def get_user(uid):
-    sheet = get_sheet(SHEET_USERS)
-    if not sheet: return None
-    try:
-        cell = sheet.find(str(uid))
-        if cell:
-            row = sheet.row_values(cell.row)
-            return {
-                "user_id": row[0], "username": row[1],
-                "currency": row[2] if len(row) > 2 else "₸",
-                "timezone": row[3] if len(row) > 3 else "Asia/Almaty",
-                "daily_reminder": row[4] if len(row) > 4 else "off",
-                "joined": row[5] if len(row) > 5 else ""
-            }
-    except:
-        pass
-    return None
-
-def register_user(uid, username):
-    sheet = get_sheet(SHEET_USERS)
-    if not sheet: return
-    if not get_user(uid):
-        sheet.append_row([str(uid), username or "", "₸", "Asia/Almaty", "off", datetime.now().strftime("%d.%m.%Y")])
-
-def get_currency(uid):
-    user = get_user(uid)
-    return user["currency"] if user else "₸"
-
-def now_str():
-    tz = pytz.timezone("Asia/Almaty")
-    return datetime.now(tz)
+def now_tz():
+    return datetime.now(pytz.timezone("Asia/Almaty"))
 
 def this_month():
-    n = now_str()
+    n = now_tz()
     return n.month, n.year
 
 def format_amount(amount, currency="₸"):
     return f"{amount:,.0f} {currency}".replace(",", " ")
 
-# ================= ГЛАВНОЕ МЕНЮ =================
+def get_user(uid):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM users WHERE user_id=?", (str(uid),)).fetchone()
+        return dict(row) if row else None
+
+def get_currency(uid):
+    user = get_user(uid)
+    return user["currency"] if user else "₸"
+
+def register_user(uid, username):
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT OR IGNORE INTO users (user_id, username, currency, daily_reminder, joined)
+            VALUES (?, ?, '₸', 'off', ?)
+        """, (str(uid), username or "", now_tz().strftime("%d.%m.%Y")))
+        conn.commit()
+
+def save_transaction(uid, tx_type, amount, category, note=""):
+    n = now_tz()
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO transactions (user_id, date, type, amount, category, note, month, year)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (str(uid), n.strftime("%d.%m.%Y %H:%M"), tx_type, amount, category, note, n.month, n.year))
+        conn.commit()
+
+def check_budget_warning(uid, category, new_amount):
+    month, year = this_month()
+    with get_conn() as conn:
+        budget = conn.execute(
+            "SELECT limit_amount FROM budgets WHERE user_id=? AND category=? AND month=? AND year=?",
+            (str(uid), category, month, year)
+        ).fetchone()
+        if not budget:
+            return None
+        limit = budget["limit_amount"]
+        spent_row = conn.execute(
+            "SELECT SUM(amount) as total FROM transactions WHERE user_id=? AND category=? AND month=? AND year=? AND type='expense'",
+            (str(uid), category, month, year)
+        ).fetchone()
+        spent = (spent_row["total"] or 0) + new_amount
+        if spent >= limit:
+            return f"⚠️ Лимит по «{category}» превышен! {format_amount(spent)} / {format_amount(limit)}"
+        elif spent >= limit * 0.8:
+            return f"⚠️ 80% бюджета по «{category}» использовано ({format_amount(spent)} / {format_amount(limit)})"
+    return None
+
+# ================= КЛАВИАТУРЫ =================
 
 def kb_main():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
@@ -171,18 +197,15 @@ def start(m):
     uid = m.from_user.id
     username = m.from_user.first_name or m.from_user.username or "друг"
     register_user(uid, username)
-    ensure_sheets()
-
     text = (
         f"👋 Привет, {username}!\n\n"
         "Я — твой личный финансовый менеджер.\n\n"
         "Что я умею:\n"
         "• Учёт доходов и расходов\n"
-        "• Установка бюджета по категориям\n"
+        "• Бюджет по категориям\n"
         "• Цели накопления\n"
-        "• Статистика за месяц\n"
-        "• Ежедневные сводки\n\n"
-        "Начни с кнопок ниже 👇"
+        "• Статистика и отчёты\n\n"
+        "💡 Быстрый ввод: `-500 еда кофе` или `+50000 зарплата`"
     )
     bot.send_message(m.chat.id, text, reply_markup=kb_main())
 
@@ -205,71 +228,54 @@ def help_cmd(m):
 
 # ================= БЫСТРЫЙ ВВОД =================
 
-@bot.message_handler(func=lambda m: re.match(r'^[+-]\d+', m.text or ""))
+@bot.message_handler(func=lambda m: bool(re.match(r'^[+-]\d+', m.text or "")))
 def quick_input(m):
     uid = m.from_user.id
-    text = m.text.strip()
     currency = get_currency(uid)
-
     try:
-        parts = text.split()
+        parts = m.text.strip().split()
         amount_str = parts[0]
         tx_type = "income" if amount_str[0] == "+" else "expense"
         amount = float(amount_str[1:].replace(",", "."))
-
         category = parts[1].lower() if len(parts) > 1 else "прочее"
         note = " ".join(parts[2:]) if len(parts) > 2 else ""
 
         save_transaction(uid, tx_type, amount, category, note)
-        
+
         emoji = "➕" if tx_type == "income" else "➖"
         cat_emoji = CATEGORY_EMOJIS.get(category, "📌")
-        
         reply = f"{emoji} {format_amount(amount, currency)}\n{cat_emoji} {category.capitalize()}"
         if note:
             reply += f"\n📝 {note}"
-        
-        # Проверяем бюджет при расходе
         if tx_type == "expense":
             warning = check_budget_warning(uid, category, amount)
             if warning:
                 reply += f"\n\n{warning}"
-
         bot.send_message(m.chat.id, reply, reply_markup=kb_main())
     except Exception as e:
         bot.send_message(m.chat.id, "❗ Формат: `-500 еда кофе` или `+50000 зарплата`", reply_markup=kb_main())
 
-# ================= ДОБАВЛЕНИЕ ДОХОДА =================
+# ================= ДОХОД / РАСХОД =================
 
 @bot.message_handler(func=lambda m: m.text == "➕ Доход")
 def add_income(m):
-    uid = m.from_user.id
-    user_state[uid] = {"action": "income_category"}
+    user_state[m.from_user.id] = {"action": "income_category"}
     bot.send_message(m.chat.id, "Выберите категорию дохода:", reply_markup=kb_categories(INCOME_CATEGORIES))
-
-# ================= ДОБАВЛЕНИЕ РАСХОДА =================
 
 @bot.message_handler(func=lambda m: m.text == "➖ Расход")
 def add_expense(m):
-    uid = m.from_user.id
-    user_state[uid] = {"action": "expense_category"}
+    user_state[m.from_user.id] = {"action": "expense_category"}
     bot.send_message(m.chat.id, "Выберите категорию расхода:", reply_markup=kb_categories(EXPENSE_CATEGORIES))
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("cat_"))
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cat_") and user_state.get(c.from_user.id, {}).get("action") in ("income_category", "expense_category"))
 def handle_category(call):
     uid = call.from_user.id
     category = call.data[4:]
-    state = user_state.get(uid, {})
-
-    if state.get("action") in ("income_category", "expense_category"):
-        tx_type = "income" if state["action"] == "income_category" else "expense"
-        user_state[uid] = {"action": "enter_amount", "type": tx_type, "category": category}
-        currency = get_currency(uid)
-        bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id,
-            f"Введите сумму ({currency}):",
-            reply_markup=kb_cancel()
-        )
+    state = user_state[uid]
+    tx_type = "income" if state["action"] == "income_category" else "expense"
+    user_state[uid] = {"action": "enter_amount", "type": tx_type, "category": category}
+    bot.answer_callback_query(call.id)
+    bot.send_message(call.message.chat.id, f"Введите сумму ({get_currency(uid)}):", reply_markup=kb_cancel())
 
 @bot.message_handler(func=lambda m: user_state.get(m.from_user.id, {}).get("action") == "enter_amount")
 def enter_amount(m):
@@ -278,12 +284,10 @@ def enter_amount(m):
         user_state.pop(uid, None)
         bot.send_message(m.chat.id, "Отменено.", reply_markup=kb_main())
         return
-
     try:
         amount = float(m.text.replace(",", ".").replace(" ", ""))
-        state = user_state[uid]
-        user_state[uid] = {**state, "action": "enter_note", "amount": amount}
-        bot.send_message(m.chat.id, "Добавьте заметку (или нажмите /skip):", reply_markup=kb_cancel())
+        user_state[uid] = {**user_state[uid], "action": "enter_note", "amount": amount}
+        bot.send_message(m.chat.id, "Добавьте заметку (или /skip):", reply_markup=kb_cancel())
     except:
         bot.send_message(m.chat.id, "❗ Введите число, например: 1500")
 
@@ -294,11 +298,9 @@ def enter_note(m):
         user_state.pop(uid, None)
         bot.send_message(m.chat.id, "Отменено.", reply_markup=kb_main())
         return
-
     note = "" if m.text == "/skip" else m.text
     state = user_state.pop(uid, {})
     currency = get_currency(uid)
-
     save_transaction(uid, state["type"], state["amount"], state["category"], note)
 
     emoji = "➕" if state["type"] == "income" else "➖"
@@ -306,52 +308,16 @@ def enter_note(m):
     reply = f"{emoji} {format_amount(state['amount'], currency)}\n{cat_emoji} {state['category'].capitalize()}"
     if note:
         reply += f"\n📝 {note}"
-
     if state["type"] == "expense":
         warning = check_budget_warning(uid, state["category"], state["amount"])
         if warning:
             reply += f"\n\n{warning}"
-
     bot.send_message(m.chat.id, reply, reply_markup=kb_main())
-
-# ================= СОХРАНЕНИЕ ТРАНЗАКЦИИ =================
-
-def save_transaction(uid, tx_type, amount, category, note=""):
-    sheet = get_sheet(SHEET_TX)
-    if not sheet: return
-    n = now_str()
-    sheet.append_row([
-        str(uid),
-        n.strftime("%d.%m.%Y %H:%M"),
-        tx_type,
-        amount,
-        category,
-        note,
-        n.month,
-        n.year
-    ])
-
-def check_budget_warning(uid, category, new_amount):
-    """Проверяет, не превышен ли бюджет по категории"""
-    month, year = this_month()
-    budget = get_budget_for_category(uid, category, month, year)
-    if not budget:
-        return None
-    
-    spent = get_spent_in_category(uid, category, month, year) + new_amount
-    limit = budget["limit"]
-    
-    if spent >= limit:
-        return f"⚠️ Лимит по «{category}» превышен! {format_amount(spent)} / {format_amount(limit)}"
-    elif spent >= limit * 0.8:
-        return f"⚠️ 80% бюджета по «{category}» использовано ({format_amount(spent)} / {format_amount(limit)})"
-    return None
 
 # ================= СТАТИСТИКА =================
 
 @bot.message_handler(func=lambda m: m.text == "📊 Статистика")
 def statistics(m):
-    uid = m.from_user.id
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         types.InlineKeyboardButton("📅 Этот месяц", callback_data="stats_month"),
@@ -367,92 +333,84 @@ def handle_stats(call):
     currency = get_currency(uid)
     mode = call.data[6:]
     bot.answer_callback_query(call.id)
+    n = now_tz()
 
-    sheet = get_sheet(SHEET_TX)
-    if not sheet:
-        bot.send_message(call.message.chat.id, "Ошибка загрузки данных.")
-        return
+    with get_conn() as conn:
+        if mode == "month":
+            rows = conn.execute(
+                "SELECT * FROM transactions WHERE user_id=? AND month=? AND year=?",
+                (str(uid), n.month, n.year)
+            ).fetchall()
+            title = f"📅 {n.strftime('%B %Y')}"
 
-    all_rows = sheet.get_all_records()
-    user_rows = [r for r in all_rows if str(r["user_id"]) == str(uid)]
+            income = sum(r["amount"] for r in rows if r["type"] == "income")
+            expense = sum(r["amount"] for r in rows if r["type"] == "expense")
+            balance = income - expense
+            text = (
+                f"*{title}*\n\n"
+                f"➕ Доходы: {format_amount(income, currency)}\n"
+                f"➖ Расходы: {format_amount(expense, currency)}\n"
+                f"{'🟢' if balance >= 0 else '🔴'} Баланс: {format_amount(balance, currency)}\n\n"
+                f"📌 Транзакций: {len(rows)}"
+            )
+            bot.send_message(call.message.chat.id, text, parse_mode="Markdown", reply_markup=kb_main())
 
-    n = now_str()
+        elif mode == "week":
+            week_ago = (n - timedelta(days=7)).strftime("%d.%m.%Y")
+            rows = conn.execute(
+                "SELECT * FROM transactions WHERE user_id=? AND date >= ?",
+                (str(uid), week_ago)
+            ).fetchall()
+            income = sum(r["amount"] for r in rows if r["type"] == "income")
+            expense = sum(r["amount"] for r in rows if r["type"] == "expense")
+            balance = income - expense
+            text = (
+                f"*📆 Последние 7 дней*\n\n"
+                f"➕ Доходы: {format_amount(income, currency)}\n"
+                f"➖ Расходы: {format_amount(expense, currency)}\n"
+                f"{'🟢' if balance >= 0 else '🔴'} Баланс: {format_amount(balance, currency)}\n\n"
+                f"📌 Транзакций: {len(rows)}"
+            )
+            bot.send_message(call.message.chat.id, text, parse_mode="Markdown", reply_markup=kb_main())
 
-    if mode == "month":
-        rows = [r for r in user_rows if int(r["month"]) == n.month and int(r["year"]) == n.year]
-        title = f"📅 {n.strftime('%B %Y')}"
-    elif mode == "week":
-        week_ago = (n - timedelta(days=7)).strftime("%d.%m.%Y")
-        rows = [r for r in user_rows if r["date"][:10] >= week_ago]
-        title = "📆 Последние 7 дней"
-    elif mode == "cats":
-        rows = [r for r in user_rows if int(r["month"]) == n.month and int(r["year"]) == n.year]
-        title = "📋 По категориям"
-        _send_category_stats(call.message.chat.id, rows, title, currency)
-        return
-    elif mode == "last":
-        rows = user_rows[-10:]
-        title = "📜 Последние 10 операций"
-        _send_last_transactions(call.message.chat.id, rows, title, currency)
-        return
+        elif mode == "cats":
+            rows = conn.execute(
+                "SELECT category, SUM(amount) as total FROM transactions WHERE user_id=? AND month=? AND year=? AND type='expense' GROUP BY category ORDER BY total DESC",
+                (str(uid), n.month, n.year)
+            ).fetchall()
+            if not rows:
+                bot.send_message(call.message.chat.id, "Нет расходов за этот месяц.", reply_markup=kb_main())
+                return
+            total = sum(r["total"] for r in rows)
+            lines = [f"*📋 По категориям — {n.strftime('%B %Y')}*\n"]
+            for r in rows:
+                pct = r["total"] / total * 100
+                bar = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
+                emoji = CATEGORY_EMOJIS.get(r["category"], "📌")
+                lines.append(f"{emoji} {r['category'].capitalize()}\n{bar} {pct:.0f}% — {format_amount(r['total'], currency)}")
+            lines.append(f"\n💸 Итого: {format_amount(total, currency)}")
+            bot.send_message(call.message.chat.id, "\n\n".join(lines), parse_mode="Markdown", reply_markup=kb_main())
 
-    income = sum(float(r["amount"]) for r in rows if r["type"] == "income")
-    expense = sum(float(r["amount"]) for r in rows if r["type"] == "expense")
-    balance = income - expense
-
-    text = (
-        f"*{title}*\n\n"
-        f"➕ Доходы: {format_amount(income, currency)}\n"
-        f"➖ Расходы: {format_amount(expense, currency)}\n"
-        f"{'🟢' if balance >= 0 else '🔴'} Баланс: {format_amount(balance, currency)}\n\n"
-        f"📌 Транзакций: {len(rows)}"
-    )
-    bot.send_message(call.message.chat.id, text, parse_mode="Markdown", reply_markup=kb_main())
-
-def _send_category_stats(chat_id, rows, title, currency):
-    expense_rows = [r for r in rows if r["type"] == "expense"]
-    cats = {}
-    for r in expense_rows:
-        cat = r["category"]
-        cats[cat] = cats.get(cat, 0) + float(r["amount"])
-
-    if not cats:
-        bot.send_message(chat_id, "Нет расходов за этот период.", reply_markup=kb_main())
-        return
-
-    total = sum(cats.values())
-    lines = [f"*{title}*\n"]
-    for cat, amt in sorted(cats.items(), key=lambda x: -x[1]):
-        emoji = CATEGORY_EMOJIS.get(cat, "📌")
-        pct = amt / total * 100
-        bar = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
-        lines.append(f"{emoji} {cat.capitalize()}\n{bar} {pct:.0f}% — {format_amount(amt, currency)}")
-
-    lines.append(f"\n💸 Итого: {format_amount(total, currency)}")
-    bot.send_message(chat_id, "\n\n".join(lines), parse_mode="Markdown", reply_markup=kb_main())
-
-def _send_last_transactions(chat_id, rows, title, currency):
-    if not rows:
-        bot.send_message(chat_id, "Нет транзакций.", reply_markup=kb_main())
-        return
-
-    lines = [f"*{title}*\n"]
-    for r in reversed(rows):
-        emoji = "➕" if r["type"] == "income" else "➖"
-        cat_emoji = CATEGORY_EMOJIS.get(r["category"], "📌")
-        note = f" — {r['note']}" if r.get("note") else ""
-        lines.append(f"{emoji} {format_amount(float(r['amount']), currency)} {cat_emoji} {r['category']}{note}\n_{r['date']}_")
-
-    bot.send_message(chat_id, "\n\n".join(lines), parse_mode="Markdown", reply_markup=kb_main())
+        elif mode == "last":
+            rows = conn.execute(
+                "SELECT * FROM transactions WHERE user_id=? ORDER BY id DESC LIMIT 10",
+                (str(uid),)
+            ).fetchall()
+            if not rows:
+                bot.send_message(call.message.chat.id, "Нет транзакций.", reply_markup=kb_main())
+                return
+            lines = ["*📜 Последние 10 операций*\n"]
+            for r in rows:
+                emoji = "➕" if r["type"] == "income" else "➖"
+                cat_emoji = CATEGORY_EMOJIS.get(r["category"], "📌")
+                note = f" — {r['note']}" if r["note"] else ""
+                lines.append(f"{emoji} {format_amount(r['amount'], currency)} {cat_emoji} {r['category']}{note}\n_{r['date']}_")
+            bot.send_message(call.message.chat.id, "\n\n".join(lines), parse_mode="Markdown", reply_markup=kb_main())
 
 # ================= БЮДЖЕТ =================
 
 @bot.message_handler(func=lambda m: m.text == "📋 Бюджет")
 def budget_menu(m):
-    uid = m.from_user.id
-    month, year = this_month()
-    currency = get_currency(uid)
-
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         types.InlineKeyboardButton("➕ Установить лимит", callback_data="budget_set"),
@@ -473,8 +431,7 @@ def budget_category_chosen(call):
     category = call.data[4:]
     user_state[uid] = {"action": "budget_amount", "category": category}
     bot.answer_callback_query(call.id)
-    currency = get_currency(uid)
-    bot.send_message(call.message.chat.id, f"Введите лимит для «{category}» ({currency}):", reply_markup=kb_cancel())
+    bot.send_message(call.message.chat.id, f"Введите лимит для «{category}» ({get_currency(uid)}):", reply_markup=kb_cancel())
 
 @bot.message_handler(func=lambda m: user_state.get(m.from_user.id, {}).get("action") == "budget_amount")
 def budget_amount_entered(m):
@@ -483,15 +440,19 @@ def budget_amount_entered(m):
         user_state.pop(uid, None)
         bot.send_message(m.chat.id, "Отменено.", reply_markup=kb_main())
         return
-
     try:
         limit = float(m.text.replace(",", ".").replace(" ", ""))
         state = user_state.pop(uid, {})
         category = state["category"]
         month, year = this_month()
         currency = get_currency(uid)
-
-        save_budget(uid, category, limit, month, year)
+        with get_conn() as conn:
+            conn.execute("""
+                INSERT INTO budgets (user_id, category, limit_amount, month, year)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, category, month, year) DO UPDATE SET limit_amount=excluded.limit_amount
+            """, (str(uid), category, limit, month, year))
+            conn.commit()
         bot.send_message(m.chat.id,
             f"✅ Лимит установлен!\n{CATEGORY_EMOJIS.get(category,'📌')} {category.capitalize()}: {format_amount(limit, currency)}/мес",
             reply_markup=kb_main()
@@ -505,71 +466,44 @@ def budget_view(call):
     month, year = this_month()
     currency = get_currency(uid)
     bot.answer_callback_query(call.id)
+    n = now_tz()
 
-    sheet_b = get_sheet(SHEET_BUDGETS)
-    sheet_t = get_sheet(SHEET_TX)
-    if not sheet_b or not sheet_t:
-        bot.send_message(call.message.chat.id, "Ошибка загрузки.")
-        return
-
-    budgets = [r for r in sheet_b.get_all_records() if str(r["user_id"]) == str(uid) and int(r["month"]) == month and int(r["year"]) == year]
-    txs = [r for r in sheet_t.get_all_records() if str(r["user_id"]) == str(uid) and int(r["month"]) == month and int(r["year"]) == year and r["type"] == "expense"]
-
-    if not budgets:
-        bot.send_message(call.message.chat.id, "Лимиты не установлены. Нажми «Установить лимит».", reply_markup=kb_main())
-        return
-
-    n = now_str()
-    lines = [f"*📋 Бюджет на {n.strftime('%B %Y')}*\n"]
-    for b in budgets:
-        cat = b["category"]
-        limit = float(b["limit_amount"])
-        spent = sum(float(r["amount"]) for r in txs if r["category"] == cat)
-        remaining = limit - spent
-        pct = min(spent / limit * 100, 100) if limit > 0 else 0
-        filled = int(pct / 10)
-        bar = "🟥" * filled + "⬜" * (10 - filled) if pct >= 80 else "🟩" * filled + "⬜" * (10 - filled)
-        status = "⚠️" if pct >= 80 else "✅"
-        emoji = CATEGORY_EMOJIS.get(cat, "📌")
-        lines.append(
-            f"{status} {emoji} {cat.capitalize()}\n"
-            f"{bar} {pct:.0f}%\n"
-            f"Потрачено: {format_amount(spent, currency)} / {format_amount(limit, currency)}\n"
-            f"Остаток: {format_amount(remaining, currency)}"
-        )
-
-    bot.send_message(call.message.chat.id, "\n\n".join(lines), parse_mode="Markdown", reply_markup=kb_main())
-
-def save_budget(uid, category, limit, month, year):
-    sheet = get_sheet(SHEET_BUDGETS)
-    if not sheet: return
-    records = sheet.get_all_records()
-    for i, r in enumerate(records):
-        if str(r["user_id"]) == str(uid) and r["category"] == category and int(r["month"]) == month:
-            sheet.update_cell(i + 2, 3, limit)
+    with get_conn() as conn:
+        budgets = conn.execute(
+            "SELECT * FROM budgets WHERE user_id=? AND month=? AND year=?",
+            (str(uid), month, year)
+        ).fetchall()
+        if not budgets:
+            bot.send_message(call.message.chat.id, "Лимиты не установлены.", reply_markup=kb_main())
             return
-    sheet.append_row([str(uid), category, limit, month, year])
 
-def get_budget_for_category(uid, category, month, year):
-    sheet = get_sheet(SHEET_BUDGETS)
-    if not sheet: return None
-    for r in sheet.get_all_records():
-        if str(r["user_id"]) == str(uid) and r["category"] == category and int(r["month"]) == month:
-            return {"limit": float(r["limit_amount"])}
-    return None
-
-def get_spent_in_category(uid, category, month, year):
-    sheet = get_sheet(SHEET_TX)
-    if not sheet: return 0
-    return sum(float(r["amount"]) for r in sheet.get_all_records()
-               if str(r["user_id"]) == str(uid) and r["category"] == category
-               and int(r["month"]) == month and r["type"] == "expense")
+        lines = [f"*📋 Бюджет на {n.strftime('%B %Y')}*\n"]
+        for b in budgets:
+            cat = b["category"]
+            limit = b["limit_amount"]
+            spent_row = conn.execute(
+                "SELECT SUM(amount) as total FROM transactions WHERE user_id=? AND category=? AND month=? AND year=? AND type='expense'",
+                (str(uid), cat, month, year)
+            ).fetchone()
+            spent = spent_row["total"] or 0
+            remaining = limit - spent
+            pct = min(spent / limit * 100, 100) if limit > 0 else 0
+            filled = int(pct / 10)
+            bar = "🟥" * filled + "⬜" * (10 - filled) if pct >= 80 else "🟩" * filled + "⬜" * (10 - filled)
+            status = "⚠️" if pct >= 80 else "✅"
+            emoji = CATEGORY_EMOJIS.get(cat, "📌")
+            lines.append(
+                f"{status} {emoji} {cat.capitalize()}\n"
+                f"{bar} {pct:.0f}%\n"
+                f"Потрачено: {format_amount(spent, currency)} / {format_amount(limit, currency)}\n"
+                f"Остаток: {format_amount(remaining, currency)}"
+            )
+    bot.send_message(call.message.chat.id, "\n\n".join(lines), parse_mode="Markdown", reply_markup=kb_main())
 
 # ================= ЦЕЛИ =================
 
 @bot.message_handler(func=lambda m: m.text == "🎯 Цели")
 def goals_menu(m):
-    uid = m.from_user.id
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         types.InlineKeyboardButton("➕ Новая цель", callback_data="goal_new"),
@@ -580,8 +514,7 @@ def goals_menu(m):
 
 @bot.callback_query_handler(func=lambda c: c.data == "goal_new")
 def goal_new(call):
-    uid = call.from_user.id
-    user_state[uid] = {"action": "goal_name"}
+    user_state[call.from_user.id] = {"action": "goal_name"}
     bot.answer_callback_query(call.id)
     bot.send_message(call.message.chat.id, "Введите название цели (например: «Телефон», «Отпуск»):", reply_markup=kb_cancel())
 
@@ -593,8 +526,7 @@ def goal_name_entered(m):
         bot.send_message(m.chat.id, "Отменено.", reply_markup=kb_main())
         return
     user_state[uid] = {"action": "goal_target", "name": m.text}
-    currency = get_currency(uid)
-    bot.send_message(m.chat.id, f"Введите целевую сумму ({currency}):", reply_markup=kb_cancel())
+    bot.send_message(m.chat.id, f"Введите целевую сумму ({get_currency(uid)}):", reply_markup=kb_cancel())
 
 @bot.message_handler(func=lambda m: user_state.get(m.from_user.id, {}).get("action") == "goal_target")
 def goal_target_entered(m):
@@ -607,80 +539,60 @@ def goal_target_entered(m):
         target = float(m.text.replace(",", ".").replace(" ", ""))
         state = user_state.pop(uid, {})
         currency = get_currency(uid)
-
-        sheet = get_sheet(SHEET_GOALS)
-        if sheet:
-            sheet.append_row([str(uid), state["name"], target, 0, currency, now_str().strftime("%d.%m.%Y"), "no"])
-
-        bot.send_message(m.chat.id,
-            f"🎯 Цель создана!\n«{state['name']}» — {format_amount(target, currency)}",
-            reply_markup=kb_main()
-        )
+        with get_conn() as conn:
+            conn.execute(
+                "INSERT INTO goals (user_id, name, target, saved, currency, created, done) VALUES (?, ?, ?, 0, ?, ?, 0)",
+                (str(uid), state["name"], target, currency, now_tz().strftime("%d.%m.%Y"))
+            )
+            conn.commit()
+        bot.send_message(m.chat.id, f"🎯 Цель создана!\n«{state['name']}» — {format_amount(target, currency)}", reply_markup=kb_main())
     except:
         bot.send_message(m.chat.id, "❗ Введите число.")
 
 @bot.callback_query_handler(func=lambda c: c.data == "goal_list")
 def goal_list(call):
     uid = call.from_user.id
-    bot.answer_callback_query(call.id)
     currency = get_currency(uid)
-
-    sheet = get_sheet(SHEET_GOALS)
-    if not sheet:
-        bot.send_message(call.message.chat.id, "Ошибка загрузки.")
-        return
-
-    goals = [r for r in sheet.get_all_records() if str(r["user_id"]) == str(uid) and r["done"] == "no"]
-
+    bot.answer_callback_query(call.id)
+    with get_conn() as conn:
+        goals = conn.execute("SELECT * FROM goals WHERE user_id=? AND done=0", (str(uid),)).fetchall()
     if not goals:
         bot.send_message(call.message.chat.id, "У тебя пока нет целей. Создай первую!", reply_markup=kb_main())
         return
-
     lines = ["*🎯 Мои цели*\n"]
     for g in goals:
-        target = float(g["target"])
-        saved = float(g["saved"])
-        pct = min(saved / target * 100, 100) if target > 0 else 0
-        remaining = target - saved
+        pct = min(g["saved"] / g["target"] * 100, 100) if g["target"] > 0 else 0
         filled = int(pct / 10)
         bar = "🟡" * filled + "⬜" * (10 - filled)
         lines.append(
             f"*{g['name']}*\n"
             f"{bar} {pct:.0f}%\n"
-            f"Накоплено: {format_amount(saved, currency)} / {format_amount(target, currency)}\n"
-            f"Осталось: {format_amount(remaining, currency)}"
+            f"Накоплено: {format_amount(g['saved'], currency)} / {format_amount(g['target'], currency)}\n"
+            f"Осталось: {format_amount(g['target'] - g['saved'], currency)}"
         )
-
     bot.send_message(call.message.chat.id, "\n\n".join(lines), parse_mode="Markdown", reply_markup=kb_main())
 
 @bot.callback_query_handler(func=lambda c: c.data == "goal_add")
 def goal_add_select(call):
     uid = call.from_user.id
     bot.answer_callback_query(call.id)
-
-    sheet = get_sheet(SHEET_GOALS)
-    if not sheet:
-        bot.send_message(call.message.chat.id, "Ошибка загрузки.")
-        return
-
-    goals = [r for r in sheet.get_all_records() if str(r["user_id"]) == str(uid) and r["done"] == "no"]
+    with get_conn() as conn:
+        goals = conn.execute("SELECT * FROM goals WHERE user_id=? AND done=0", (str(uid),)).fetchall()
     if not goals:
         bot.send_message(call.message.chat.id, "Нет активных целей.", reply_markup=kb_main())
         return
-
     kb = types.InlineKeyboardMarkup()
     for g in goals:
-        kb.add(types.InlineKeyboardButton(g["name"], callback_data=f"goal_deposit_{g['name']}"))
+        kb.add(types.InlineKeyboardButton(g["name"], callback_data=f"goal_deposit_{g['id']}"))
     bot.send_message(call.message.chat.id, "В какую цель пополнить?", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("goal_deposit_"))
 def goal_deposit_chosen(call):
     uid = call.from_user.id
-    goal_name = call.data[len("goal_deposit_"):]
-    user_state[uid] = {"action": "goal_deposit_amount", "goal_name": goal_name}
+    goal_id = call.data[len("goal_deposit_"):]
+    user_state[uid] = {"action": "goal_deposit_amount", "goal_id": goal_id}
     bot.answer_callback_query(call.id)
-    currency = get_currency(uid)
-    bot.send_message(call.message.chat.id, f"Введите сумму пополнения цели «{goal_name}» ({currency}):", reply_markup=kb_cancel())
+    bot.send_message(call.message.chat.id, f"Введите сумму пополнения ({get_currency(uid)}):", reply_markup=kb_cancel())
 
 @bot.message_handler(func=lambda m: user_state.get(m.from_user.id, {}).get("action") == "goal_deposit_amount")
 def goal_deposit_amount(m):
@@ -692,36 +604,30 @@ def goal_deposit_amount(m):
     try:
         amount = float(m.text.replace(",", ".").replace(" ", ""))
         state = user_state.pop(uid, {})
-        goal_name = state["goal_name"]
+        goal_id = state["goal_id"]
         currency = get_currency(uid)
-
-        sheet = get_sheet(SHEET_GOALS)
-        if sheet:
-            records = sheet.get_all_records()
-            for i, r in enumerate(records):
-                if str(r["user_id"]) == str(uid) and r["name"] == goal_name and r["done"] == "no":
-                    new_saved = float(r["saved"]) + amount
-                    sheet.update_cell(i + 2, 4, new_saved)
-                    target = float(r["target"])
-
-                    if new_saved >= target:
-                        sheet.update_cell(i + 2, 7, "yes")
-                        bot.send_message(m.chat.id,
-                            f"🎉 Поздравляю! Цель «{goal_name}» достигнута!\n{format_amount(new_saved, currency)} / {format_amount(target, currency)}",
-                            reply_markup=kb_main()
-                        )
-                    else:
-                        remaining = target - new_saved
-                        pct = new_saved / target * 100
-                        bot.send_message(m.chat.id,
-                            f"💰 Пополнено: +{format_amount(amount, currency)}\n"
-                            f"«{goal_name}»: {pct:.0f}% ({format_amount(new_saved, currency)} / {format_amount(target, currency)})\n"
-                            f"Осталось: {format_amount(remaining, currency)}",
-                            reply_markup=kb_main()
-                        )
-                    return
-
-        bot.send_message(m.chat.id, "Цель не найдена.", reply_markup=kb_main())
+        with get_conn() as conn:
+            goal = conn.execute("SELECT * FROM goals WHERE id=? AND user_id=?", (goal_id, str(uid))).fetchone()
+            if not goal:
+                bot.send_message(m.chat.id, "Цель не найдена.", reply_markup=kb_main())
+                return
+            new_saved = goal["saved"] + amount
+            done = 1 if new_saved >= goal["target"] else 0
+            conn.execute("UPDATE goals SET saved=?, done=? WHERE id=?", (new_saved, done, goal_id))
+            conn.commit()
+            if done:
+                bot.send_message(m.chat.id,
+                    f"🎉 Поздравляю! Цель «{goal['name']}» достигнута!\n{format_amount(new_saved, currency)} / {format_amount(goal['target'], currency)}",
+                    reply_markup=kb_main()
+                )
+            else:
+                pct = new_saved / goal["target"] * 100
+                bot.send_message(m.chat.id,
+                    f"💰 Пополнено: +{format_amount(amount, currency)}\n"
+                    f"«{goal['name']}»: {pct:.0f}% ({format_amount(new_saved, currency)} / {format_amount(goal['target'], currency)})\n"
+                    f"Осталось: {format_amount(goal['target'] - new_saved, currency)}",
+                    reply_markup=kb_main()
+                )
     except:
         bot.send_message(m.chat.id, "❗ Введите число.")
 
@@ -733,11 +639,10 @@ def settings(m):
     user = get_user(uid)
     currency = user["currency"] if user else "₸"
     reminder = user["daily_reminder"] if user else "off"
-    reminder_label = f"🔔 Напоминание: {reminder}" if reminder != "off" else "🔕 Напоминание: выкл"
-
+    reminder_label = f"🔔 {reminder}" if reminder != "off" else "🔕 Напоминание выкл"
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
-        types.InlineKeyboardButton("💱 Валюта: " + currency, callback_data="settings_currency"),
+        types.InlineKeyboardButton(f"💱 Валюта: {currency}", callback_data="settings_currency"),
         types.InlineKeyboardButton(reminder_label, callback_data="settings_reminder"),
         types.InlineKeyboardButton("🗑 Удалить все данные", callback_data="settings_delete")
     )
@@ -761,13 +666,9 @@ def currency_chosen(call):
     uid = call.from_user.id
     currency = call.data[9:]
     bot.answer_callback_query(call.id)
-
-    sheet = get_sheet(SHEET_USERS)
-    if sheet:
-        cell = sheet.find(str(uid))
-        if cell:
-            sheet.update_cell(cell.row, 3, currency)
-
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET currency=? WHERE user_id=?", (currency, str(uid)))
+        conn.commit()
     bot.send_message(call.message.chat.id, f"✅ Валюта изменена на {currency}", reply_markup=kb_main())
 
 @bot.callback_query_handler(func=lambda c: c.data == "settings_reminder")
@@ -787,13 +688,9 @@ def reminder_chosen(call):
     uid = call.from_user.id
     time_val = call.data[9:]
     bot.answer_callback_query(call.id)
-
-    sheet = get_sheet(SHEET_USERS)
-    if sheet:
-        cell = sheet.find(str(uid))
-        if cell:
-            sheet.update_cell(cell.row, 5, time_val)
-
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET daily_reminder=? WHERE user_id=?", (time_val, str(uid)))
+        conn.commit()
     label = f"в {time_val}" if time_val != "off" else "выключено"
     bot.send_message(call.message.chat.id, f"✅ Напоминание {label}", reply_markup=kb_main())
 
@@ -805,7 +702,7 @@ def settings_delete_confirm(call):
         types.InlineKeyboardButton("⚠️ Да, удалить всё", callback_data="confirm_delete"),
         types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_delete")
     )
-    bot.send_message(call.message.chat.id, "Удалить ВСЕ твои данные? Это действие необратимо.", reply_markup=kb)
+    bot.send_message(call.message.chat.id, "Удалить ВСЕ твои данные? Это необратимо.", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data in ("confirm_delete", "cancel_delete"))
 def handle_delete(call):
@@ -814,74 +711,62 @@ def handle_delete(call):
     if call.data == "cancel_delete":
         bot.send_message(call.message.chat.id, "Отменено.", reply_markup=kb_main())
         return
-
-    for sheet_name in [SHEET_TX, SHEET_BUDGETS, SHEET_GOALS]:
-        sheet = get_sheet(sheet_name)
-        if not sheet: continue
-        records = sheet.get_all_records()
-        rows_to_delete = [i + 2 for i, r in enumerate(records) if str(r.get("user_id", "")) == str(uid)]
-        for row in reversed(rows_to_delete):
-            sheet.delete_rows(row)
-
+    with get_conn() as conn:
+        conn.execute("DELETE FROM transactions WHERE user_id=?", (str(uid),))
+        conn.execute("DELETE FROM budgets WHERE user_id=?", (str(uid),))
+        conn.execute("DELETE FROM goals WHERE user_id=?", (str(uid),))
+        conn.commit()
     bot.send_message(call.message.chat.id, "✅ Все данные удалены.", reply_markup=kb_main())
 
-# ================= ЕЖЕДНЕВНАЯ СВОДКА (ФОНОВЫЙ ПОТОК) =================
+# ================= ЕЖЕДНЕВНАЯ СВОДКА =================
 
 def daily_summary_loop():
     while True:
         try:
-            tz = pytz.timezone("Asia/Almaty")
-            now = datetime.now(tz)
-            now_time = now.strftime("%H:%M")
+            n = now_tz()
+            now_time = n.strftime("%H:%M")
+            with get_conn() as conn:
+                users = conn.execute("SELECT * FROM users WHERE daily_reminder=?", (now_time,)).fetchall()
+                for user in users:
+                    uid = user["user_id"]
+                    currency = user["currency"]
+                    today_str = n.strftime("%d.%m.%Y")
 
-            sheet_users = get_sheet(SHEET_USERS)
-            sheet_tx = get_sheet(SHEET_TX)
-            if not sheet_users or not sheet_tx:
-                time.sleep(55)
-                continue
+                    today_rows = conn.execute(
+                        "SELECT * FROM transactions WHERE user_id=? AND date LIKE ?",
+                        (uid, f"{today_str}%")
+                    ).fetchall()
+                    month_rows = conn.execute(
+                        "SELECT * FROM transactions WHERE user_id=? AND month=? AND year=?",
+                        (uid, n.month, n.year)
+                    ).fetchall()
 
-            users = sheet_users.get_all_records()
-            all_tx = sheet_tx.get_all_records()
+                    income_today = sum(r["amount"] for r in today_rows if r["type"] == "income")
+                    expense_today = sum(r["amount"] for r in today_rows if r["type"] == "expense")
+                    income_month = sum(r["amount"] for r in month_rows if r["type"] == "income")
+                    expense_month = sum(r["amount"] for r in month_rows if r["type"] == "expense")
 
-            for user in users:
-                if str(user.get("daily_reminder", "off")) != now_time:
-                    continue
-
-                uid = user["user_id"]
-                currency = user.get("currency", "₸")
-                n = now
-                month_tx = [r for r in all_tx if str(r["user_id"]) == str(uid) and int(r["month"]) == n.month and int(r["year"]) == n.year]
-                today_str = n.strftime("%d.%m.%Y")
-                today_tx = [r for r in month_tx if r["date"].startswith(today_str)]
-
-                income_today = sum(float(r["amount"]) for r in today_tx if r["type"] == "income")
-                expense_today = sum(float(r["amount"]) for r in today_tx if r["type"] == "expense")
-                income_month = sum(float(r["amount"]) for r in month_tx if r["type"] == "income")
-                expense_month = sum(float(r["amount"]) for r in month_tx if r["type"] == "expense")
-
-                text = (
-                    f"📊 *Ежедневная сводка*\n\n"
-                    f"*Сегодня ({today_str}):*\n"
-                    f"➕ {format_amount(income_today, currency)}\n"
-                    f"➖ {format_amount(expense_today, currency)}\n\n"
-                    f"*За месяц:*\n"
-                    f"➕ {format_amount(income_month, currency)}\n"
-                    f"➖ {format_amount(expense_month, currency)}\n"
-                    f"{'🟢' if income_month >= expense_month else '🔴'} Баланс: {format_amount(income_month - expense_month, currency)}"
-                )
-                try:
-                    bot.send_message(uid, text, parse_mode="Markdown")
-                except Exception as e:
-                    print(f"Ошибка отправки сводки пользователю {uid}: {e}")
-
+                    text = (
+                        f"📊 *Ежедневная сводка*\n\n"
+                        f"*Сегодня:*\n"
+                        f"➕ {format_amount(income_today, currency)}\n"
+                        f"➖ {format_amount(expense_today, currency)}\n\n"
+                        f"*За месяц:*\n"
+                        f"➕ {format_amount(income_month, currency)}\n"
+                        f"➖ {format_amount(expense_month, currency)}\n"
+                        f"{'🟢' if income_month >= expense_month else '🔴'} Баланс: {format_amount(income_month - expense_month, currency)}"
+                    )
+                    try:
+                        bot.send_message(uid, text, parse_mode="Markdown")
+                    except Exception as e:
+                        print(f"Ошибка отправки сводки {uid}: {e}")
         except Exception as e:
             print(f"Ошибка daily_summary_loop: {e}")
-
         time.sleep(55)
 
 threading.Thread(target=daily_summary_loop, daemon=True).start()
 
-# ================= FLASK WEBHOOK =================
+# ================= FLASK =================
 
 @app.route(f"/webhook/{TOKEN}", methods=["POST"])
 def webhook():
