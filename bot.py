@@ -1,4 +1,3 @@
-cat > /mnt/user-data/outputs/bot.py << 'ENDOFFILE'
 import os
 import re
 import pytz
