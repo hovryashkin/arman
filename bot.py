@@ -3,7 +3,7 @@ import re
 import pytz
 import time
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask, request
 from telebot import telebot, types
 import psycopg2
@@ -12,7 +12,7 @@ from psycopg2.extras import RealDictCursor
 # ================= НАСТРОЙКИ =================
 
 TOKEN = os.getenv("BOT_TOKEN")
-RENDER_URL = os.getenv("RENDER_URL", "https://arman-c2rh.onrender.com")
+RENDER_URL = os.getenv("RENDER_URL", "https://your-app.onrender.com")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 bot = telebot.TeleBot(TOKEN)
@@ -21,169 +21,170 @@ app = Flask(__name__)
 # ================= БАЗА ДАННЫХ =================
 
 def get_conn():
-    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-    return conn
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 def init_db():
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS users (
+                CREATE TABLE IF NOT EXISTS profiles (
                     user_id TEXT PRIMARY KEY,
                     username TEXT,
-                    currency TEXT DEFAULT '₸',
-                    daily_reminder TEXT DEFAULT 'off',
-                    joined TEXT
-                )
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS transactions (
-                    id SERIAL PRIMARY KEY,
-                    user_id TEXT,
-                    date TEXT,
-                    type TEXT,
-                    amount REAL,
-                    category TEXT,
-                    note TEXT,
-                    month INTEGER,
-                    year INTEGER
-                )
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS budgets (
-                    id SERIAL PRIMARY KEY,
-                    user_id TEXT,
-                    category TEXT,
-                    limit_amount REAL,
-                    month INTEGER,
-                    year INTEGER,
-                    UNIQUE(user_id, category, month, year)
-                )
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS goals (
-                    id SERIAL PRIMARY KEY,
-                    user_id TEXT,
                     name TEXT,
-                    target REAL,
-                    saved REAL DEFAULT 0,
-                    currency TEXT,
+                    age INTEGER,
+                    gender TEXT,
+                    looking_for TEXT,
+                    city TEXT,
+                    interests TEXT,
+                    bio TEXT,
+                    photo_id TEXT,
+                    active BOOLEAN DEFAULT TRUE,
+                    created TEXT
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS swipes (
+                    id SERIAL PRIMARY KEY,
+                    from_user TEXT,
+                    to_user TEXT,
+                    action TEXT,
                     created TEXT,
-                    done INTEGER DEFAULT 0
+                    UNIQUE(from_user, to_user)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS matches (
+                    id SERIAL PRIMARY KEY,
+                    user1 TEXT,
+                    user2 TEXT,
+                    created TEXT,
+                    UNIQUE(user1, user2)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    id SERIAL PRIMARY KEY,
+                    match_id INTEGER,
+                    from_user TEXT,
+                    text TEXT,
+                    created TEXT
                 )
             """)
         conn.commit()
 
 init_db()
 
-# ================= КАТЕГОРИИ =================
-
-EXPENSE_CATEGORIES = {
-    "🍔 Еда": "еда",
-    "🚗 Транспорт": "транспорт",
-    "🏠 Жильё": "жильё",
-    "💊 Здоровье": "здоровье",
-    "🎮 Развлечения": "развлечения",
-    "👗 Одежда": "одежда",
-    "📚 Образование": "образование",
-    "💡 Коммунальные": "коммунальные",
-    "🛍 Прочее": "прочее"
-}
-
-INCOME_CATEGORIES = {
-    "💼 Зарплата": "зарплата",
-    "💰 Фриланс": "фриланс",
-    "🎁 Подарок": "подарок",
-    "📈 Инвестиции": "инвестиции",
-    "🔄 Прочее": "прочее"
-}
-
-CATEGORY_EMOJIS = {
-    "еда": "🍔", "транспорт": "🚗", "жильё": "🏠", "здоровье": "💊",
-    "развлечения": "🎮", "одежда": "👗", "образование": "📚",
-    "коммунальные": "💡", "прочее": "🛍", "зарплата": "💼",
-    "фриланс": "💰", "подарок": "🎁", "инвестиции": "📈"
-}
-
-# ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
+# ================= СОСТОЯНИЯ =================
 
 user_state = {}
 
-def now_tz():
-    return datetime.now(pytz.timezone("Asia/Almaty"))
+INTERESTS_LIST = [
+    "🎵 Музыка", "🎮 Игры", "📚 Книги", "🏋️ Спорт",
+    "✈️ Путешествия", "🍕 Еда", "🎬 Кино", "💻 Технологии",
+    "🎨 Искусство", "🐾 Животные", "🌿 Природа", "💃 Танцы"
+]
 
-def this_month():
-    n = now_tz()
-    return n.month, n.year
+# ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
 
-def format_amount(amount, currency="₸"):
-    return f"{amount:,.0f} {currency}".replace(",", " ")
+def now_str():
+    return datetime.now(pytz.timezone("UTC")).strftime("%d.%m.%Y %H:%M")
 
-def get_user(uid):
+def get_profile(uid):
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM users WHERE user_id=%s", (str(uid),))
+            cur.execute("SELECT * FROM profiles WHERE user_id=%s", (str(uid),))
             return cur.fetchone()
 
-def get_currency(uid):
-    user = get_user(uid)
-    return user["currency"] if user else "₸"
-
-def register_user(uid, username):
+def get_match_id(uid1, uid2):
+    u1, u2 = sorted([str(uid1), str(uid2)])
     with get_conn() as conn:
         with conn.cursor() as cur:
+            cur.execute("SELECT id FROM matches WHERE user1=%s AND user2=%s", (u1, u2))
+            row = cur.fetchone()
+            return row["id"] if row else None
+
+def get_next_profile(uid):
+    """Возвращает следующий профиль для просмотра с учётом фильтров"""
+    profile = get_profile(uid)
+    if not profile:
+        return None
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            # Исключаем уже просмотренных и себя
             cur.execute("""
-                INSERT INTO users (user_id, username, currency, daily_reminder, joined)
-                VALUES (%s, %s, '₸', 'off', %s)
-                ON CONFLICT (user_id) DO NOTHING
-            """, (str(uid), username or "", now_tz().strftime("%d.%m.%Y")))
-        conn.commit()
+                SELECT * FROM profiles
+                WHERE user_id != %s
+                AND active = TRUE
+                AND user_id NOT IN (
+                    SELECT to_user FROM swipes WHERE from_user=%s
+                )
+                AND (looking_for = %s OR looking_for = 'all')
+                ORDER BY RANDOM()
+                LIMIT 1
+            """, (str(uid), str(uid), profile["gender"]))
+            return cur.fetchone()
 
-def save_transaction(uid, tx_type, amount, category, note=""):
-    n = now_tz()
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO transactions (user_id, date, type, amount, category, note, month, year)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """, (str(uid), n.strftime("%d.%m.%Y %H:%M"), tx_type, amount, category, note, n.month, n.year))
-        conn.commit()
-
-def check_budget_warning(uid, category, new_amount):
-    month, year = this_month()
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT limit_amount FROM budgets WHERE user_id=%s AND category=%s AND month=%s AND year=%s",
-                (str(uid), category, month, year)
-            )
-            budget = cur.fetchone()
-            if not budget:
-                return None
-            limit = budget["limit_amount"]
-            cur.execute(
-                "SELECT COALESCE(SUM(amount), 0) as total FROM transactions WHERE user_id=%s AND category=%s AND month=%s AND year=%s AND type='expense'",
-                (str(uid), category, month, year)
-            )
-            spent = cur.fetchone()["total"] + new_amount
-            if spent >= limit:
-                return f"⚠️ Лимит по «{category}» превышен! {format_amount(spent)} / {format_amount(limit)}"
-            elif spent >= limit * 0.8:
-                return f"⚠️ 80% бюджета по «{category}» использовано ({format_amount(spent)} / {format_amount(limit)})"
-    return None
+def format_profile(p, show_contacts=False):
+    interests = p["interests"] or ""
+    text = (
+        f"👤 *{p['name']}, {p['age']}*\n"
+        f"📍 {p['city']}\n"
+        f"{'💙' if p['gender'] == 'male' else '💗'} {'Мужчина' if p['gender'] == 'male' else 'Женщина'}\n"
+    )
+    if interests:
+        text += f"✨ {interests}\n"
+    if p["bio"]:
+        text += f"\n_{p['bio']}_"
+    return text
 
 # ================= КЛАВИАТУРЫ =================
 
-def kb_main():
+def kb_main(uid):
+    profile = get_profile(uid)
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    if profile:
+        kb.add(
+            types.KeyboardButton("👀 Смотреть анкеты"),
+            types.KeyboardButton("💌 Мои матчи"),
+            types.KeyboardButton("📝 Моя анкета"),
+            types.KeyboardButton("⚙️ Настройки")
+        )
+    else:
+        kb.add(types.KeyboardButton("📝 Создать анкету"))
+    return kb
+
+def kb_swipe():
+    kb = types.InlineKeyboardMarkup(row_width=3)
     kb.add(
-        types.KeyboardButton("➕ Доход"),
-        types.KeyboardButton("➖ Расход"),
-        types.KeyboardButton("📊 Статистика"),
-        types.KeyboardButton("🎯 Цели"),
-        types.KeyboardButton("📋 Бюджет"),
-        types.KeyboardButton("⚙️ Настройки")
+        types.InlineKeyboardButton("❌ Пропустить", callback_data="swipe_no"),
+        types.InlineKeyboardButton("❤️ Лайк", callback_data="swipe_yes"),
+        types.InlineKeyboardButton("⭐ Суперлайк", callback_data="swipe_super")
     )
+    return kb
+
+def kb_gender():
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("👨 Мужчина", callback_data="gender_male"),
+        types.InlineKeyboardButton("👩 Женщина", callback_data="gender_female")
+    )
+    return kb
+
+def kb_looking_for():
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("👨 Мужчин", callback_data="lf_male"),
+        types.InlineKeyboardButton("👩 Женщин", callback_data="lf_female"),
+        types.InlineKeyboardButton("👥 Всех", callback_data="lf_all")
+    )
+    return kb
+
+def kb_interests(selected):
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    for interest in INTERESTS_LIST:
+        mark = "✅ " if interest in selected else ""
+        kb.add(types.InlineKeyboardButton(f"{mark}{interest}", callback_data=f"int_{interest}"))
+    kb.add(types.InlineKeyboardButton("➡️ Готово", callback_data="int_done"))
     return kb
 
 def kb_cancel():
@@ -191,582 +192,586 @@ def kb_cancel():
     kb.add(types.KeyboardButton("❌ Отмена"))
     return kb
 
-def kb_categories(cat_dict):
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    buttons = [types.InlineKeyboardButton(label, callback_data=f"cat_{val}") for label, val in cat_dict.items()]
-    kb.add(*buttons)
-    return kb
-
-# ================= КОМАНДЫ =================
+# ================= СТАРТ =================
 
 @bot.message_handler(commands=["start"])
 def start(m):
     uid = m.from_user.id
-    username = m.from_user.first_name or m.from_user.username or "друг"
-    register_user(uid, username)
-    text = (
-        f"👋 Привет, {username}!\n\n"
-        "Я — твой личный финансовый менеджер.\n\n"
-        "Что я умею:\n"
-        "• Учёт доходов и расходов\n"
-        "• Бюджет по категориям\n"
-        "• Цели накопления\n"
-        "• Статистика и отчёты\n\n"
-        "💡 Быстрый ввод: -500 еда кофе или +50000 зарплата"
-    )
-    bot.send_message(m.chat.id, text, reply_markup=kb_main())
+    profile = get_profile(uid)
+    if profile:
+        bot.send_message(m.chat.id,
+            f"👋 С возвращением, {profile['name']}!",
+            reply_markup=kb_main(uid)
+        )
+    else:
+        bot.send_message(m.chat.id,
+            "👋 Добро пожаловать в dating-бот!\n\n"
+            "Здесь ты найдёшь интересных людей со всего мира.\n\n"
+            "Давай создадим твою анкету 👇",
+            reply_markup=kb_main(uid)
+        )
 
-@bot.message_handler(commands=["help"])
-def help_cmd(m):
-    text = (
-        "📖 Как пользоваться:\n\n"
-        "Быстрый ввод:\n"
-        "-500 еда кофе — расход 500 на еду\n"
-        "+50000 зарплата — доход 50000\n\n"
-        "Кнопки меню:\n"
-        "➕ Доход — добавить доход\n"
-        "➖ Расход — добавить расход\n"
-        "📊 Статистика — отчёт за месяц\n"
-        "🎯 Цели — копилки и накопления\n"
-        "📋 Бюджет — лимиты по категориям\n"
-        "⚙️ Настройки — валюта, напоминания"
-    )
-    bot.send_message(m.chat.id, text, reply_markup=kb_main())
+# ================= СОЗДАНИЕ АНКЕТЫ =================
 
-# ================= БЫСТРЫЙ ВВОД =================
-
-@bot.message_handler(func=lambda m: bool(re.match(r'^[+-]\d+', m.text or "")))
-def quick_input(m):
+@bot.message_handler(func=lambda m: m.text in ("📝 Создать анкету", "📝 Моя анкета"))
+def create_profile(m):
     uid = m.from_user.id
-    currency = get_currency(uid)
-    try:
-        parts = m.text.strip().split()
-        amount_str = parts[0]
-        tx_type = "income" if amount_str[0] == "+" else "expense"
-        amount = float(amount_str[1:].replace(",", "."))
-        category = parts[1].lower() if len(parts) > 1 else "прочее"
-        note = " ".join(parts[2:]) if len(parts) > 2 else ""
-        save_transaction(uid, tx_type, amount, category, note)
-        emoji = "➕" if tx_type == "income" else "➖"
-        cat_emoji = CATEGORY_EMOJIS.get(category, "📌")
-        reply = f"{emoji} {format_amount(amount, currency)}\n{cat_emoji} {category.capitalize()}"
-        if note:
-            reply += f"\n📝 {note}"
-        if tx_type == "expense":
-            warning = check_budget_warning(uid, category, amount)
-            if warning:
-                reply += f"\n\n{warning}"
-        bot.send_message(m.chat.id, reply, reply_markup=kb_main())
-    except Exception as e:
-        print(f"quick_input error: {e}")
-        bot.send_message(m.chat.id, "Формат: -500 еда кофе или +50000 зарплата", reply_markup=kb_main())
+    profile = get_profile(uid)
+    if profile and m.text == "📝 Моя анкета":
+        # Показываем анкету
+        text = format_profile(profile)
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(
+            types.InlineKeyboardButton("✏️ Редактировать", callback_data="edit_profile"),
+            types.InlineKeyboardButton("🔴 Скрыть анкету" if profile["active"] else "🟢 Показать анкету",
+                callback_data="toggle_active")
+        )
+        if profile["photo_id"]:
+            bot.send_photo(m.chat.id, profile["photo_id"], caption=text, parse_mode="Markdown", reply_markup=kb)
+        else:
+            bot.send_message(m.chat.id, text, parse_mode="Markdown", reply_markup=kb)
+        return
 
-# ================= ДОХОД / РАСХОД =================
+    user_state[uid] = {"action": "reg_name"}
+    bot.send_message(m.chat.id, "Как тебя зовут? Введи имя:", reply_markup=kb_cancel())
 
-@bot.message_handler(func=lambda m: m.text == "➕ Доход")
-def add_income(m):
-    user_state[m.from_user.id] = {"action": "income_category"}
-    bot.send_message(m.chat.id, "Выберите категорию дохода:", reply_markup=kb_categories(INCOME_CATEGORIES))
-
-@bot.message_handler(func=lambda m: m.text == "➖ Расход")
-def add_expense(m):
-    user_state[m.from_user.id] = {"action": "expense_category"}
-    bot.send_message(m.chat.id, "Выберите категорию расхода:", reply_markup=kb_categories(EXPENSE_CATEGORIES))
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("cat_") and user_state.get(c.from_user.id, {}).get("action") in ("income_category", "expense_category"))
-def handle_category(call):
-    uid = call.from_user.id
-    category = call.data[4:]
-    tx_type = "income" if user_state[uid]["action"] == "income_category" else "expense"
-    user_state[uid] = {"action": "enter_amount", "type": tx_type, "category": category}
-    bot.answer_callback_query(call.id)
-    bot.send_message(call.message.chat.id, f"Введите сумму ({get_currency(uid)}):", reply_markup=kb_cancel())
-
-@bot.message_handler(func=lambda m: user_state.get(m.from_user.id, {}).get("action") == "enter_amount")
-def enter_amount(m):
+@bot.message_handler(func=lambda m: user_state.get(m.from_user.id, {}).get("action") == "reg_name")
+def reg_name(m):
     uid = m.from_user.id
     if m.text == "❌ Отмена":
         user_state.pop(uid, None)
-        bot.send_message(m.chat.id, "Отменено.", reply_markup=kb_main())
+        bot.send_message(m.chat.id, "Отменено.", reply_markup=kb_main(uid))
+        return
+    if len(m.text) > 30:
+        bot.send_message(m.chat.id, "Имя слишком длинное. Введи покороче:")
+        return
+    user_state[uid] = {"action": "reg_age", "name": m.text}
+    bot.send_message(m.chat.id, "Сколько тебе лет?", reply_markup=kb_cancel())
+
+@bot.message_handler(func=lambda m: user_state.get(m.from_user.id, {}).get("action") == "reg_age")
+def reg_age(m):
+    uid = m.from_user.id
+    if m.text == "❌ Отмена":
+        user_state.pop(uid, None)
+        bot.send_message(m.chat.id, "Отменено.", reply_markup=kb_main(uid))
         return
     try:
-        amount = float(m.text.replace(",", ".").replace(" ", ""))
-        user_state[uid] = {**user_state[uid], "action": "enter_note", "amount": amount}
-        bot.send_message(m.chat.id, "Добавьте заметку (или /skip):", reply_markup=kb_cancel())
+        age = int(m.text)
+        if age < 18 or age > 99:
+            bot.send_message(m.chat.id, "Возраст должен быть от 18 до 99.")
+            return
+        user_state[uid] = {**user_state[uid], "action": "reg_gender", "age": age}
+        bot.send_message(m.chat.id, "Выбери свой пол:", reply_markup=kb_gender())
     except:
-        bot.send_message(m.chat.id, "Введите число, например: 1500")
+        bot.send_message(m.chat.id, "Введи число, например: 25")
 
-@bot.message_handler(func=lambda m: user_state.get(m.from_user.id, {}).get("action") == "enter_note")
-def enter_note(m):
+@bot.callback_query_handler(func=lambda c: c.data.startswith("gender_"))
+def reg_gender(call):
+    uid = call.from_user.id
+    if user_state.get(uid, {}).get("action") != "reg_gender":
+        return
+    gender = call.data[7:]
+    user_state[uid] = {**user_state[uid], "action": "reg_looking_for", "gender": gender}
+    bot.answer_callback_query(call.id)
+    bot.send_message(call.message.chat.id, "Кого ищешь?", reply_markup=kb_looking_for())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("lf_"))
+def reg_looking_for(call):
+    uid = call.from_user.id
+    if user_state.get(uid, {}).get("action") != "reg_looking_for":
+        return
+    lf = call.data[3:]
+    user_state[uid] = {**user_state[uid], "action": "reg_city", "looking_for": lf}
+    bot.answer_callback_query(call.id)
+    bot.send_message(call.message.chat.id, "Из какого ты города?", reply_markup=kb_cancel())
+
+@bot.message_handler(func=lambda m: user_state.get(m.from_user.id, {}).get("action") == "reg_city")
+def reg_city(m):
     uid = m.from_user.id
     if m.text == "❌ Отмена":
         user_state.pop(uid, None)
-        bot.send_message(m.chat.id, "Отменено.", reply_markup=kb_main())
+        bot.send_message(m.chat.id, "Отменено.", reply_markup=kb_main(uid))
         return
-    note = "" if m.text == "/skip" else m.text
-    state = user_state.pop(uid, {})
-    currency = get_currency(uid)
-    save_transaction(uid, state["type"], state["amount"], state["category"], note)
-    emoji = "➕" if state["type"] == "income" else "➖"
-    cat_emoji = CATEGORY_EMOJIS.get(state["category"], "📌")
-    reply = f"{emoji} {format_amount(state['amount'], currency)}\n{cat_emoji} {state['category'].capitalize()}"
-    if note:
-        reply += f"\n📝 {note}"
-    if state["type"] == "expense":
-        warning = check_budget_warning(uid, state["category"], state["amount"])
-        if warning:
-            reply += f"\n\n{warning}"
-    bot.send_message(m.chat.id, reply, reply_markup=kb_main())
+    user_state[uid] = {**user_state[uid], "action": "reg_interests", "city": m.text, "interests": []}
+    bot.send_message(m.chat.id, "Выбери интересы (можно несколько):",
+        reply_markup=kb_interests([]))
 
-# ================= СТАТИСТИКА =================
-
-@bot.message_handler(func=lambda m: m.text == "📊 Статистика")
-def statistics(m):
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        types.InlineKeyboardButton("📅 Этот месяц", callback_data="stats_month"),
-        types.InlineKeyboardButton("📆 Эта неделя", callback_data="stats_week"),
-        types.InlineKeyboardButton("📋 По категориям", callback_data="stats_cats"),
-        types.InlineKeyboardButton("📜 Последние 10", callback_data="stats_last")
-    )
-    bot.send_message(m.chat.id, "Выберите отчёт:", reply_markup=kb)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("stats_"))
-def handle_stats(call):
+@bot.callback_query_handler(func=lambda c: c.data.startswith("int_") and user_state.get(c.from_user.id, {}).get("action") == "reg_interests")
+def reg_interests(call):
     uid = call.from_user.id
-    currency = get_currency(uid)
-    mode = call.data[6:]
+    val = call.data[4:]
+    if val == "done":
+        user_state[uid] = {**user_state[uid], "action": "reg_bio"}
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, "Расскажи о себе пару слов (или нажми /skip):", reply_markup=kb_cancel())
+        return
+    selected = user_state[uid].get("interests", [])
+    if val in selected:
+        selected.remove(val)
+    else:
+        if len(selected) < 5:
+            selected.append(val)
+        else:
+            bot.answer_callback_query(call.id, "Максимум 5 интересов!")
+            return
+    user_state[uid]["interests"] = selected
     bot.answer_callback_query(call.id)
-    n = now_tz()
+    try:
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=kb_interests(selected))
+    except:
+        pass
+
+@bot.message_handler(func=lambda m: user_state.get(m.from_user.id, {}).get("action") == "reg_bio")
+def reg_bio(m):
+    uid = m.from_user.id
+    if m.text == "❌ Отмена":
+        user_state.pop(uid, None)
+        bot.send_message(m.chat.id, "Отменено.", reply_markup=kb_main(uid))
+        return
+    bio = "" if m.text == "/skip" else m.text[:300]
+    user_state[uid] = {**user_state[uid], "action": "reg_photo", "bio": bio}
+    bot.send_message(m.chat.id, "Отправь своё фото (или /skip):", reply_markup=kb_cancel())
+
+@bot.message_handler(content_types=["photo"], func=lambda m: user_state.get(m.from_user.id, {}).get("action") == "reg_photo")
+def reg_photo(m):
+    uid = m.from_user.id
+    photo_id = m.photo[-1].file_id
+    user_state[uid] = {**user_state[uid], "photo_id": photo_id}
+    finish_registration(m.chat.id, uid)
+
+@bot.message_handler(func=lambda m: user_state.get(m.from_user.id, {}).get("action") == "reg_photo")
+def reg_photo_skip(m):
+    uid = m.from_user.id
+    if m.text == "❌ Отмена":
+        user_state.pop(uid, None)
+        bot.send_message(m.chat.id, "Отменено.", reply_markup=kb_main(uid))
+        return
+    finish_registration(m.chat.id, uid)
+
+def finish_registration(chat_id, uid):
+    state = user_state.pop(uid, {})
+    interests_str = ", ".join(state.get("interests", []))
+    username = bot.get_chat(uid).username or ""
 
     with get_conn() as conn:
         with conn.cursor() as cur:
-            if mode == "month":
-                cur.execute("SELECT * FROM transactions WHERE user_id=%s AND month=%s AND year=%s", (str(uid), n.month, n.year))
-                rows = cur.fetchall()
-                income = sum(r["amount"] for r in rows if r["type"] == "income")
-                expense = sum(r["amount"] for r in rows if r["type"] == "expense")
-                balance = income - expense
-                text = (
-                    f"📅 {n.strftime('%B %Y')}\n\n"
-                    f"➕ Доходы: {format_amount(income, currency)}\n"
-                    f"➖ Расходы: {format_amount(expense, currency)}\n"
-                    f"{'🟢' if balance >= 0 else '🔴'} Баланс: {format_amount(balance, currency)}\n\n"
-                    f"📌 Транзакций: {len(rows)}"
-                )
-                bot.send_message(call.message.chat.id, text, reply_markup=kb_main())
+            cur.execute("""
+                INSERT INTO profiles (user_id, username, name, age, gender, looking_for, city, interests, bio, photo_id, active, created)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    name=EXCLUDED.name, age=EXCLUDED.age, gender=EXCLUDED.gender,
+                    looking_for=EXCLUDED.looking_for, city=EXCLUDED.city,
+                    interests=EXCLUDED.interests, bio=EXCLUDED.bio,
+                    photo_id=EXCLUDED.photo_id, active=TRUE
+            """, (
+                str(uid), username, state["name"], state["age"], state["gender"],
+                state["looking_for"], state["city"], interests_str,
+                state.get("bio", ""), state.get("photo_id", ""), now_str()
+            ))
+        conn.commit()
 
-            elif mode == "week":
-                week_ago = (n - timedelta(days=7)).strftime("%d.%m.%Y")
-                cur.execute("SELECT * FROM transactions WHERE user_id=%s AND date >= %s", (str(uid), week_ago))
-                rows = cur.fetchall()
-                income = sum(r["amount"] for r in rows if r["type"] == "income")
-                expense = sum(r["amount"] for r in rows if r["type"] == "expense")
-                balance = income - expense
-                text = (
-                    f"📆 Последние 7 дней\n\n"
-                    f"➕ Доходы: {format_amount(income, currency)}\n"
-                    f"➖ Расходы: {format_amount(expense, currency)}\n"
-                    f"{'🟢' if balance >= 0 else '🔴'} Баланс: {format_amount(balance, currency)}\n\n"
-                    f"📌 Транзакций: {len(rows)}"
-                )
-                bot.send_message(call.message.chat.id, text, reply_markup=kb_main())
-
-            elif mode == "cats":
-                cur.execute(
-                    "SELECT category, SUM(amount) as total FROM transactions WHERE user_id=%s AND month=%s AND year=%s AND type='expense' GROUP BY category ORDER BY total DESC",
-                    (str(uid), n.month, n.year)
-                )
-                rows = cur.fetchall()
-                if not rows:
-                    bot.send_message(call.message.chat.id, "Нет расходов за этот месяц.", reply_markup=kb_main())
-                    return
-                total = sum(r["total"] for r in rows)
-                lines = [f"📋 По категориям — {n.strftime('%B %Y')}\n"]
-                for r in rows:
-                    pct = r["total"] / total * 100
-                    bar = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
-                    emoji = CATEGORY_EMOJIS.get(r["category"], "📌")
-                    lines.append(f"{emoji} {r['category'].capitalize()}\n{bar} {pct:.0f}% — {format_amount(r['total'], currency)}")
-                lines.append(f"\n💸 Итого: {format_amount(total, currency)}")
-                bot.send_message(call.message.chat.id, "\n\n".join(lines), reply_markup=kb_main())
-
-            elif mode == "last":
-                cur.execute("SELECT * FROM transactions WHERE user_id=%s ORDER BY id DESC LIMIT 10", (str(uid),))
-                rows = cur.fetchall()
-                if not rows:
-                    bot.send_message(call.message.chat.id, "Нет транзакций.", reply_markup=kb_main())
-                    return
-                lines = ["📜 Последние 10 операций\n"]
-                for r in rows:
-                    emoji = "➕" if r["type"] == "income" else "➖"
-                    cat_emoji = CATEGORY_EMOJIS.get(r["category"], "📌")
-                    note = f" — {r['note']}" if r["note"] else ""
-                    lines.append(f"{emoji} {format_amount(r['amount'], currency)} {cat_emoji} {r['category']}{note}\n{r['date']}")
-                bot.send_message(call.message.chat.id, "\n\n".join(lines), reply_markup=kb_main())
-
-# ================= БЮДЖЕТ =================
-
-@bot.message_handler(func=lambda m: m.text == "📋 Бюджет")
-def budget_menu(m):
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        types.InlineKeyboardButton("➕ Установить лимит", callback_data="budget_set"),
-        types.InlineKeyboardButton("📊 Текущий бюджет", callback_data="budget_view")
+    bot.send_message(chat_id,
+        f"🎉 Анкета создана!\n\n"
+        f"👤 {state['name']}, {state['age']}\n"
+        f"📍 {state['city']}\n\n"
+        "Теперь ты можешь смотреть анкеты!",
+        reply_markup=kb_main(uid)
     )
-    bot.send_message(m.chat.id, "📋 Управление бюджетом:", reply_markup=kb)
 
-@bot.callback_query_handler(func=lambda c: c.data == "budget_set")
-def budget_set(call):
-    uid = call.from_user.id
-    user_state[uid] = {"action": "budget_category"}
-    bot.answer_callback_query(call.id)
-    bot.send_message(call.message.chat.id, "Выберите категорию для лимита:", reply_markup=kb_categories(EXPENSE_CATEGORIES))
+# ================= СВАЙПЫ =================
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("cat_") and user_state.get(c.from_user.id, {}).get("action") == "budget_category")
-def budget_category_chosen(call):
-    uid = call.from_user.id
-    category = call.data[4:]
-    user_state[uid] = {"action": "budget_amount", "category": category}
-    bot.answer_callback_query(call.id)
-    bot.send_message(call.message.chat.id, f"Введите лимит для «{category}» ({get_currency(uid)}):", reply_markup=kb_cancel())
-
-@bot.message_handler(func=lambda m: user_state.get(m.from_user.id, {}).get("action") == "budget_amount")
-def budget_amount_entered(m):
+@bot.message_handler(func=lambda m: m.text == "👀 Смотреть анкеты")
+def browse_profiles(m):
     uid = m.from_user.id
-    if m.text == "❌ Отмена":
-        user_state.pop(uid, None)
-        bot.send_message(m.chat.id, "Отменено.", reply_markup=kb_main())
+    profile = get_profile(uid)
+    if not profile:
+        bot.send_message(m.chat.id, "Сначала создай анкету!", reply_markup=kb_main(uid))
         return
-    try:
-        limit = float(m.text.replace(",", ".").replace(" ", ""))
-        state = user_state.pop(uid, {})
-        category = state["category"]
-        month, year = this_month()
-        currency = get_currency(uid)
+    show_next_profile(m.chat.id, uid)
+
+def show_next_profile(chat_id, uid):
+    candidate = get_next_profile(uid)
+    if not candidate:
+        bot.send_message(chat_id,
+            "😔 Анкеты закончились!\nПопробуй позже — появятся новые люди.",
+            reply_markup=kb_main(uid)
+        )
+        return
+
+    text = format_profile(candidate)
+    # Сохраняем кто сейчас показывается
+    user_state[uid] = {"viewing": str(candidate["user_id"])}
+
+    if candidate["photo_id"]:
+        bot.send_photo(chat_id, candidate["photo_id"], caption=text, parse_mode="Markdown", reply_markup=kb_swipe())
+    else:
+        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=kb_swipe())
+
+@bot.callback_query_handler(func=lambda c: c.data in ("swipe_yes", "swipe_no", "swipe_super"))
+def handle_swipe(call):
+    uid = call.from_user.id
+    state = user_state.get(uid, {})
+    to_uid = state.get("viewing")
+
+    if not to_uid:
+        bot.answer_callback_query(call.id, "Анкета уже не актуальна.")
+        return
+
+    action = call.data[6:]  # yes / no / super
+    bot.answer_callback_query(call.id)
+
+    # Сохраняем свайп
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            try:
+                cur.execute("""
+                    INSERT INTO swipes (from_user, to_user, action, created)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (from_user, to_user) DO NOTHING
+                """, (str(uid), to_uid, action, now_str()))
+            except:
+                pass
+        conn.commit()
+
+    # Проверяем взаимный лайк
+    if action in ("yes", "super"):
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO budgets (user_id, category, limit_amount, month, year)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (user_id, category, month, year) DO UPDATE SET limit_amount=EXCLUDED.limit_amount
-                """, (str(uid), category, limit, month, year))
-            conn.commit()
-        bot.send_message(m.chat.id,
-            f"✅ Лимит установлен!\n{CATEGORY_EMOJIS.get(category,'📌')} {category.capitalize()}: {format_amount(limit, currency)}/мес",
-            reply_markup=kb_main()
-        )
-    except:
-        bot.send_message(m.chat.id, "Введите число.")
+                    SELECT * FROM swipes
+                    WHERE from_user=%s AND to_user=%s AND action IN ('yes', 'super')
+                """, (to_uid, str(uid)))
+                mutual = cur.fetchone()
 
-@bot.callback_query_handler(func=lambda c: c.data == "budget_view")
-def budget_view(call):
-    uid = call.from_user.id
-    month, year = this_month()
-    currency = get_currency(uid)
-    bot.answer_callback_query(call.id)
-    n = now_tz()
+        if mutual:
+            # МАТЧ!
+            u1, u2 = sorted([str(uid), to_uid])
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    try:
+                        cur.execute("""
+                            INSERT INTO matches (user1, user2, created)
+                            VALUES (%s, %s, %s)
+                            ON CONFLICT DO NOTHING
+                        """, (u1, u2, now_str()))
+                    except:
+                        pass
+                conn.commit()
+
+            # Уведомляем обоих
+            their_profile = get_profile(to_uid)
+            my_profile = get_profile(uid)
+
+            match_kb = types.InlineKeyboardMarkup()
+            match_kb.add(types.InlineKeyboardButton("💌 Написать", callback_data=f"chat_{to_uid}"))
+
+            bot.send_message(uid,
+                f"🎉 *Это матч!*\n\nВам понравился {their_profile['name']}!",
+                parse_mode="Markdown", reply_markup=match_kb
+            )
+
+            match_kb2 = types.InlineKeyboardMarkup()
+            match_kb2.add(types.InlineKeyboardButton("💌 Написать", callback_data=f"chat_{uid}"))
+            bot.send_message(to_uid,
+                f"🎉 *Это матч!*\n\nВам понравился {my_profile['name']}!",
+                parse_mode="Markdown", reply_markup=match_kb2
+            )
+
+    # Показываем следующий профиль
+    user_state[uid] = {}
+    show_next_profile(call.message.chat.id, uid)
+
+# ================= МАТЧИ =================
+
+@bot.message_handler(func=lambda m: m.text == "💌 Мои матчи")
+def my_matches(m):
+    uid = m.from_user.id
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM budgets WHERE user_id=%s AND month=%s AND year=%s", (str(uid), month, year))
-            budgets = cur.fetchall()
-            if not budgets:
-                bot.send_message(call.message.chat.id, "Лимиты не установлены.", reply_markup=kb_main())
-                return
-            lines = [f"📋 Бюджет на {n.strftime('%B %Y')}\n"]
-            for b in budgets:
-                cat = b["category"]
-                limit = b["limit_amount"]
-                cur.execute(
-                    "SELECT COALESCE(SUM(amount), 0) as total FROM transactions WHERE user_id=%s AND category=%s AND month=%s AND year=%s AND type='expense'",
-                    (str(uid), cat, month, year)
-                )
-                spent = cur.fetchone()["total"]
-                remaining = limit - spent
-                pct = min(spent / limit * 100, 100) if limit > 0 else 0
-                filled = int(pct / 10)
-                bar = "🟥" * filled + "⬜" * (10 - filled) if pct >= 80 else "🟩" * filled + "⬜" * (10 - filled)
-                status = "⚠️" if pct >= 80 else "✅"
-                emoji = CATEGORY_EMOJIS.get(cat, "📌")
-                lines.append(
-                    f"{status} {emoji} {cat.capitalize()}\n"
-                    f"{bar} {pct:.0f}%\n"
-                    f"Потрачено: {format_amount(spent, currency)} / {format_amount(limit, currency)}\n"
-                    f"Остаток: {format_amount(remaining, currency)}"
-                )
-    bot.send_message(call.message.chat.id, "\n\n".join(lines), reply_markup=kb_main())
+            cur.execute("""
+                SELECT * FROM matches
+                WHERE user1=%s OR user2=%s
+                ORDER BY created DESC
+            """, (str(uid), str(uid)))
+            matches = cur.fetchall()
 
-# ================= ЦЕЛИ =================
+    if not matches:
+        bot.send_message(m.chat.id, "У тебя пока нет матчей 😔\nПродолжай листать анкеты!", reply_markup=kb_main(uid))
+        return
 
-@bot.message_handler(func=lambda m: m.text == "🎯 Цели")
-def goals_menu(m):
+    kb = types.InlineKeyboardMarkup()
+    for match in matches:
+        other_uid = match["user2"] if match["user1"] == str(uid) else match["user1"]
+        other = get_profile(other_uid)
+        if other:
+            kb.add(types.InlineKeyboardButton(
+                f"{'❤️' if match else '💬'} {other['name']}, {other['age']} — {other['city']}",
+                callback_data=f"chat_{other_uid}"
+            ))
+
+    bot.send_message(m.chat.id, f"💌 Твои матчи ({len(matches)}):", reply_markup=kb)
+
+# ================= ЧАТ =================
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("chat_"))
+def open_chat(call):
+    uid = call.from_user.id
+    other_uid = call.data[5:]
+    bot.answer_callback_query(call.id)
+
+    # Проверяем что матч существует
+    match_id = get_match_id(uid, other_uid)
+    if not match_id:
+        bot.send_message(call.message.chat.id, "Матч не найден.")
+        return
+
+    other = get_profile(other_uid)
+    user_state[uid] = {"action": "chatting", "with": other_uid, "match_id": match_id}
+
+    # Показываем последние сообщения
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT * FROM messages WHERE match_id=%s
+                ORDER BY id DESC LIMIT 10
+            """, (match_id,))
+            msgs = list(reversed(cur.fetchall()))
+
+    my_profile = get_profile(uid)
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(types.KeyboardButton("🔙 Назад к матчам"))
+
+    if msgs:
+        history = []
+        for msg in msgs:
+            sender = my_profile["name"] if msg["from_user"] == str(uid) else other["name"]
+            history.append(f"*{sender}:* {msg['text']}")
+        bot.send_message(call.message.chat.id,
+            f"💬 Чат с {other['name']}\n\n" + "\n".join(history) + "\n\nПиши сообщение:",
+            parse_mode="Markdown", reply_markup=kb
+        )
+    else:
+        bot.send_message(call.message.chat.id,
+            f"💬 Чат с {other['name']}\n\nНапиши первым! 👇",
+            reply_markup=kb
+        )
+
+@bot.message_handler(func=lambda m: m.text == "🔙 Назад к матчам")
+def back_to_matches(m):
+    uid = m.from_user.id
+    user_state.pop(uid, None)
+    bot.send_message(m.chat.id, "Возвращаемся к матчам...", reply_markup=kb_main(uid))
+    my_matches(m)
+
+@bot.message_handler(func=lambda m: user_state.get(m.from_user.id, {}).get("action") == "chatting")
+def send_chat_message(m):
+    uid = m.from_user.id
+    state = user_state.get(uid, {})
+    other_uid = state.get("with")
+    match_id = state.get("match_id")
+
+    if not other_uid or not match_id:
+        return
+
+    # Сохраняем сообщение
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO messages (match_id, from_user, text, created)
+                VALUES (%s, %s, %s, %s)
+            """, (match_id, str(uid), m.text, now_str()))
+        conn.commit()
+
+    # Пересылаем другому пользователю
+    my_profile = get_profile(uid)
+    try:
+        reply_kb = types.InlineKeyboardMarkup()
+        reply_kb.add(types.InlineKeyboardButton("💬 Ответить", callback_data=f"chat_{uid}"))
+        bot.send_message(other_uid,
+            f"💌 *{my_profile['name']}:*\n{m.text}",
+            parse_mode="Markdown",
+            reply_markup=reply_kb
+        )
+        bot.send_message(m.chat.id, "✅ Отправлено!")
+    except Exception as e:
+        print(f"Ошибка отправки сообщения: {e}")
+        bot.send_message(m.chat.id, "❌ Не удалось доставить сообщение.")
+
+# ================= РЕДАКТИРОВАНИЕ АНКЕТЫ =================
+
+@bot.callback_query_handler(func=lambda c: c.data == "edit_profile")
+def edit_profile(call):
+    uid = call.from_user.id
+    bot.answer_callback_query(call.id)
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
-        types.InlineKeyboardButton("➕ Новая цель", callback_data="goal_new"),
-        types.InlineKeyboardButton("💰 Пополнить", callback_data="goal_add"),
-        types.InlineKeyboardButton("📋 Мои цели", callback_data="goal_list")
+        types.InlineKeyboardButton("✏️ Имя", callback_data="edit_name"),
+        types.InlineKeyboardButton("🔢 Возраст", callback_data="edit_age"),
+        types.InlineKeyboardButton("📍 Город", callback_data="edit_city"),
+        types.InlineKeyboardButton("📝 О себе", callback_data="edit_bio"),
+        types.InlineKeyboardButton("🖼 Фото", callback_data="edit_photo"),
+        types.InlineKeyboardButton("✨ Интересы", callback_data="edit_interests"),
     )
-    bot.send_message(m.chat.id, "🎯 Цели накопления:", reply_markup=kb)
+    bot.send_message(call.message.chat.id, "Что хочешь изменить?", reply_markup=kb)
 
-@bot.callback_query_handler(func=lambda c: c.data == "goal_new")
-def goal_new(call):
-    user_state[call.from_user.id] = {"action": "goal_name"}
+@bot.callback_query_handler(func=lambda c: c.data in ("edit_name", "edit_age", "edit_city", "edit_bio", "edit_photo", "edit_interests"))
+def handle_edit(call):
+    uid = call.from_user.id
+    field = call.data[5:]
     bot.answer_callback_query(call.id)
-    bot.send_message(call.message.chat.id, "Введите название цели (например: Телефон, Отпуск):", reply_markup=kb_cancel())
 
-@bot.message_handler(func=lambda m: user_state.get(m.from_user.id, {}).get("action") == "goal_name")
-def goal_name_entered(m):
-    uid = m.from_user.id
-    if m.text == "❌ Отмена":
-        user_state.pop(uid, None)
-        bot.send_message(m.chat.id, "Отменено.", reply_markup=kb_main())
+    if field == "interests":
+        profile = get_profile(uid)
+        current = profile["interests"].split(", ") if profile and profile["interests"] else []
+        user_state[uid] = {"action": "edit_interests", "interests": current}
+        bot.send_message(call.message.chat.id, "Выбери интересы:", reply_markup=kb_interests(current))
         return
-    user_state[uid] = {"action": "goal_target", "name": m.text}
-    bot.send_message(m.chat.id, f"Введите целевую сумму ({get_currency(uid)}):", reply_markup=kb_cancel())
 
-@bot.message_handler(func=lambda m: user_state.get(m.from_user.id, {}).get("action") == "goal_target")
-def goal_target_entered(m):
-    uid = m.from_user.id
-    if m.text == "❌ Отмена":
-        user_state.pop(uid, None)
-        bot.send_message(m.chat.id, "Отменено.", reply_markup=kb_main())
-        return
-    try:
-        target = float(m.text.replace(",", ".").replace(" ", ""))
-        state = user_state.pop(uid, {})
-        currency = get_currency(uid)
+    prompts = {
+        "name": "Введи новое имя:",
+        "age": "Введи новый возраст:",
+        "city": "Введи новый город:",
+        "bio": "Расскажи о себе (или /skip):",
+        "photo": "Отправь новое фото (или /skip):"
+    }
+    user_state[uid] = {"action": f"edit_{field}"}
+    bot.send_message(call.message.chat.id, prompts[field], reply_markup=kb_cancel())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("int_") and user_state.get(c.from_user.id, {}).get("action") == "edit_interests")
+def edit_interests_handler(call):
+    uid = call.from_user.id
+    val = call.data[4:]
+    if val == "done":
+        selected = user_state.pop(uid, {}).get("interests", [])
+        interests_str = ", ".join(selected)
         with get_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO goals (user_id, name, target, saved, currency, created, done) VALUES (%s, %s, %s, 0, %s, %s, 0)",
-                    (str(uid), state["name"], target, currency, now_tz().strftime("%d.%m.%Y"))
-                )
+                cur.execute("UPDATE profiles SET interests=%s WHERE user_id=%s", (interests_str, str(uid)))
             conn.commit()
-        bot.send_message(m.chat.id, f"🎯 Цель создана!\n{state['name']} — {format_amount(target, currency)}", reply_markup=kb_main())
-    except:
-        bot.send_message(m.chat.id, "Введите число.")
-
-@bot.callback_query_handler(func=lambda c: c.data == "goal_list")
-def goal_list(call):
-    uid = call.from_user.id
-    currency = get_currency(uid)
-    bot.answer_callback_query(call.id)
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM goals WHERE user_id=%s AND done=0", (str(uid),))
-            goals = cur.fetchall()
-    if not goals:
-        bot.send_message(call.message.chat.id, "У тебя пока нет целей. Создай первую!", reply_markup=kb_main())
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, "✅ Интересы обновлены!", reply_markup=kb_main(uid))
         return
-    lines = ["🎯 Мои цели\n"]
-    for g in goals:
-        pct = min(g["saved"] / g["target"] * 100, 100) if g["target"] > 0 else 0
-        filled = int(pct / 10)
-        bar = "🟡" * filled + "⬜" * (10 - filled)
-        lines.append(
-            f"{g['name']}\n"
-            f"{bar} {pct:.0f}%\n"
-            f"Накоплено: {format_amount(g['saved'], currency)} / {format_amount(g['target'], currency)}\n"
-            f"Осталось: {format_amount(g['target'] - g['saved'], currency)}"
-        )
-    bot.send_message(call.message.chat.id, "\n\n".join(lines), reply_markup=kb_main())
-
-@bot.callback_query_handler(func=lambda c: c.data == "goal_add")
-def goal_add_select(call):
-    uid = call.from_user.id
-    bot.answer_callback_query(call.id)
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM goals WHERE user_id=%s AND done=0", (str(uid),))
-            goals = cur.fetchall()
-    if not goals:
-        bot.send_message(call.message.chat.id, "Нет активных целей.", reply_markup=kb_main())
-        return
-    kb = types.InlineKeyboardMarkup()
-    for g in goals:
-        kb.add(types.InlineKeyboardButton(g["name"], callback_data=f"goal_deposit_{g['id']}"))
-    bot.send_message(call.message.chat.id, "В какую цель пополнить?", reply_markup=kb)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("goal_deposit_"))
-def goal_deposit_chosen(call):
-    uid = call.from_user.id
-    goal_id = call.data[len("goal_deposit_"):]
-    user_state[uid] = {"action": "goal_deposit_amount", "goal_id": goal_id}
-    bot.answer_callback_query(call.id)
-    bot.send_message(call.message.chat.id, f"Введите сумму пополнения ({get_currency(uid)}):", reply_markup=kb_cancel())
-
-@bot.message_handler(func=lambda m: user_state.get(m.from_user.id, {}).get("action") == "goal_deposit_amount")
-def goal_deposit_amount(m):
-    uid = m.from_user.id
-    if m.text == "❌ Отмена":
-        user_state.pop(uid, None)
-        bot.send_message(m.chat.id, "Отменено.", reply_markup=kb_main())
-        return
-    try:
-        amount = float(m.text.replace(",", ".").replace(" ", ""))
-        state = user_state.pop(uid, {})
-        goal_id = state["goal_id"]
-        currency = get_currency(uid)
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT * FROM goals WHERE id=%s AND user_id=%s", (goal_id, str(uid)))
-                goal = cur.fetchone()
-                if not goal:
-                    bot.send_message(m.chat.id, "Цель не найдена.", reply_markup=kb_main())
-                    return
-                new_saved = goal["saved"] + amount
-                done = 1 if new_saved >= goal["target"] else 0
-                cur.execute("UPDATE goals SET saved=%s, done=%s WHERE id=%s", (new_saved, done, goal_id))
-            conn.commit()
-        if done:
-            bot.send_message(m.chat.id,
-                f"🎉 Цель достигнута! {goal['name']}\n{format_amount(new_saved, currency)} / {format_amount(goal['target'], currency)}",
-                reply_markup=kb_main()
-            )
+    selected = user_state[uid].get("interests", [])
+    if val in selected:
+        selected.remove(val)
+    else:
+        if len(selected) < 5:
+            selected.append(val)
         else:
-            pct = new_saved / goal["target"] * 100
-            bot.send_message(m.chat.id,
-                f"💰 +{format_amount(amount, currency)}\n"
-                f"{goal['name']}: {pct:.0f}% ({format_amount(new_saved, currency)} / {format_amount(goal['target'], currency)})\n"
-                f"Осталось: {format_amount(goal['target'] - new_saved, currency)}",
-                reply_markup=kb_main()
-            )
-    except Exception as e:
-        print(f"goal_deposit error: {e}")
-        bot.send_message(m.chat.id, "Введите число.")
+            bot.answer_callback_query(call.id, "Максимум 5!")
+            return
+    user_state[uid]["interests"] = selected
+    bot.answer_callback_query(call.id)
+    try:
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=kb_interests(selected))
+    except:
+        pass
+
+@bot.message_handler(func=lambda m: user_state.get(m.from_user.id, {}).get("action") in ("edit_name", "edit_age", "edit_city", "edit_bio"))
+def handle_edit_text(m):
+    uid = m.from_user.id
+    action = user_state.get(uid, {}).get("action", "")
+    if m.text == "❌ Отмена":
+        user_state.pop(uid, None)
+        bot.send_message(m.chat.id, "Отменено.", reply_markup=kb_main(uid))
+        return
+
+    field = action[5:]
+    value = m.text if m.text != "/skip" else ""
+
+    if field == "age":
+        try:
+            value = int(m.text)
+            if value < 18 or value > 99:
+                bot.send_message(m.chat.id, "Возраст от 18 до 99.")
+                return
+        except:
+            bot.send_message(m.chat.id, "Введи число.")
+            return
+
+    user_state.pop(uid, None)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"UPDATE profiles SET {field}=%s WHERE user_id=%s", (value, str(uid)))
+        conn.commit()
+    bot.send_message(m.chat.id, "✅ Обновлено!", reply_markup=kb_main(uid))
+
+@bot.message_handler(content_types=["photo"], func=lambda m: user_state.get(m.from_user.id, {}).get("action") == "edit_photo")
+def handle_edit_photo(m):
+    uid = m.from_user.id
+    photo_id = m.photo[-1].file_id
+    user_state.pop(uid, None)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE profiles SET photo_id=%s WHERE user_id=%s", (photo_id, str(uid)))
+        conn.commit()
+    bot.send_message(m.chat.id, "✅ Фото обновлено!", reply_markup=kb_main(uid))
+
+@bot.message_handler(func=lambda m: user_state.get(m.from_user.id, {}).get("action") == "edit_photo")
+def handle_edit_photo_skip(m):
+    uid = m.from_user.id
+    if m.text in ("❌ Отмена", "/skip"):
+        user_state.pop(uid, None)
+        bot.send_message(m.chat.id, "Без изменений.", reply_markup=kb_main(uid))
+
+# ================= ПОКАЗАТЬ / СКРЫТЬ АНКЕТУ =================
+
+@bot.callback_query_handler(func=lambda c: c.data == "toggle_active")
+def toggle_active(call):
+    uid = call.from_user.id
+    bot.answer_callback_query(call.id)
+    profile = get_profile(uid)
+    new_status = not profile["active"]
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE profiles SET active=%s WHERE user_id=%s", (new_status, str(uid)))
+        conn.commit()
+    status_text = "🟢 Анкета видна всем!" if new_status else "🔴 Анкета скрыта."
+    bot.send_message(call.message.chat.id, status_text, reply_markup=kb_main(uid))
 
 # ================= НАСТРОЙКИ =================
 
 @bot.message_handler(func=lambda m: m.text == "⚙️ Настройки")
 def settings(m):
     uid = m.from_user.id
-    user = get_user(uid)
-    currency = user["currency"] if user else "₸"
-    reminder = user["daily_reminder"] if user else "off"
-    reminder_label = f"🔔 {reminder}" if reminder != "off" else "🔕 Напоминание выкл"
-    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(
-        types.InlineKeyboardButton(f"💱 Валюта: {currency}", callback_data="settings_currency"),
-        types.InlineKeyboardButton(reminder_label, callback_data="settings_reminder"),
-        types.InlineKeyboardButton("🗑 Удалить все данные", callback_data="settings_delete")
+        types.InlineKeyboardButton("🔍 Изменить фильтры поиска", callback_data="change_filters"),
+        types.InlineKeyboardButton("🗑 Удалить анкету", callback_data="delete_profile")
     )
     bot.send_message(m.chat.id, "⚙️ Настройки:", reply_markup=kb)
 
-@bot.callback_query_handler(func=lambda c: c.data == "settings_currency")
-def settings_currency(call):
-    bot.answer_callback_query(call.id)
-    kb = types.InlineKeyboardMarkup(row_width=3)
-    kb.add(
-        types.InlineKeyboardButton("₸ Тенге", callback_data="currency_₸"),
-        types.InlineKeyboardButton("₽ Рубль", callback_data="currency_₽"),
-        types.InlineKeyboardButton("$ Доллар", callback_data="currency_$"),
-        types.InlineKeyboardButton("€ Евро", callback_data="currency_€"),
-        types.InlineKeyboardButton("£ Фунт", callback_data="currency_£"),
-    )
-    bot.send_message(call.message.chat.id, "Выберите валюту:", reply_markup=kb)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("currency_"))
-def currency_chosen(call):
+@bot.callback_query_handler(func=lambda c: c.data == "change_filters")
+def change_filters(call):
     uid = call.from_user.id
-    currency = call.data[9:]
     bot.answer_callback_query(call.id)
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE users SET currency=%s WHERE user_id=%s", (currency, str(uid)))
-        conn.commit()
-    bot.send_message(call.message.chat.id, f"✅ Валюта изменена на {currency}", reply_markup=kb_main())
+    user_state[uid] = {"action": "reg_looking_for"}
+    bot.send_message(call.message.chat.id, "Кого ищешь?", reply_markup=kb_looking_for())
 
-@bot.callback_query_handler(func=lambda c: c.data == "settings_reminder")
-def settings_reminder(call):
-    bot.answer_callback_query(call.id)
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        types.InlineKeyboardButton("🌅 08:00", callback_data="reminder_08:00"),
-        types.InlineKeyboardButton("🌆 18:00", callback_data="reminder_18:00"),
-        types.InlineKeyboardButton("🌙 21:00", callback_data="reminder_21:00"),
-        types.InlineKeyboardButton("🔕 Выключить", callback_data="reminder_off"),
-    )
-    bot.send_message(call.message.chat.id, "Ежедневная сводка — когда присылать?", reply_markup=kb)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("reminder_"))
-def reminder_chosen(call):
-    uid = call.from_user.id
-    time_val = call.data[9:]
-    bot.answer_callback_query(call.id)
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE users SET daily_reminder=%s WHERE user_id=%s", (time_val, str(uid)))
-        conn.commit()
-    label = f"в {time_val}" if time_val != "off" else "выключено"
-    bot.send_message(call.message.chat.id, f"✅ Напоминание {label}", reply_markup=kb_main())
-
-@bot.callback_query_handler(func=lambda c: c.data == "settings_delete")
-def settings_delete_confirm(call):
+@bot.callback_query_handler(func=lambda c: c.data == "delete_profile")
+def delete_profile_confirm(call):
     bot.answer_callback_query(call.id)
     kb = types.InlineKeyboardMarkup()
     kb.add(
-        types.InlineKeyboardButton("⚠️ Да, удалить всё", callback_data="confirm_delete"),
-        types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_delete")
+        types.InlineKeyboardButton("⚠️ Да, удалить", callback_data="confirm_delete_profile"),
+        types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_delete_profile")
     )
-    bot.send_message(call.message.chat.id, "Удалить ВСЕ твои данные? Это необратимо.", reply_markup=kb)
+    bot.send_message(call.message.chat.id, "Удалить анкету и все данные? Это необратимо.", reply_markup=kb)
 
-@bot.callback_query_handler(func=lambda c: c.data in ("confirm_delete", "cancel_delete"))
-def handle_delete(call):
+@bot.callback_query_handler(func=lambda c: c.data in ("confirm_delete_profile", "cancel_delete_profile"))
+def handle_delete_profile(call):
     uid = call.from_user.id
     bot.answer_callback_query(call.id)
-    if call.data == "cancel_delete":
-        bot.send_message(call.message.chat.id, "Отменено.", reply_markup=kb_main())
+    if call.data == "cancel_delete_profile":
+        bot.send_message(call.message.chat.id, "Отменено.", reply_markup=kb_main(uid))
         return
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM transactions WHERE user_id=%s", (str(uid),))
-            cur.execute("DELETE FROM budgets WHERE user_id=%s", (str(uid),))
-            cur.execute("DELETE FROM goals WHERE user_id=%s", (str(uid),))
+            cur.execute("DELETE FROM profiles WHERE user_id=%s", (str(uid),))
+            cur.execute("DELETE FROM swipes WHERE from_user=%s OR to_user=%s", (str(uid), str(uid)))
+            cur.execute("DELETE FROM matches WHERE user1=%s OR user2=%s", (str(uid), str(uid)))
         conn.commit()
-    bot.send_message(call.message.chat.id, "✅ Все данные удалены.", reply_markup=kb_main())
-
-# ================= ЕЖЕДНЕВНАЯ СВОДКА =================
-
-def daily_summary_loop():
-    while True:
-        try:
-            n = now_tz()
-            now_time = n.strftime("%H:%M")
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT * FROM users WHERE daily_reminder=%s", (now_time,))
-                    users = cur.fetchall()
-                    for user in users:
-                        uid = user["user_id"]
-                        currency = user["currency"]
-                        today_str = n.strftime("%d.%m.%Y")
-                        cur.execute("SELECT * FROM transactions WHERE user_id=%s AND date LIKE %s", (uid, f"{today_str}%"))
-                        today_rows = cur.fetchall()
-                        cur.execute("SELECT * FROM transactions WHERE user_id=%s AND month=%s AND year=%s", (uid, n.month, n.year))
-                        month_rows = cur.fetchall()
-                        income_today = sum(r["amount"] for r in today_rows if r["type"] == "income")
-                        expense_today = sum(r["amount"] for r in today_rows if r["type"] == "expense")
-                        income_month = sum(r["amount"] for r in month_rows if r["type"] == "income")
-                        expense_month = sum(r["amount"] for r in month_rows if r["type"] == "expense")
-                        text = (
-                            f"📊 Ежедневная сводка\n\n"
-                            f"Сегодня:\n"
-                            f"➕ {format_amount(income_today, currency)}\n"
-                            f"➖ {format_amount(expense_today, currency)}\n\n"
-                            f"За месяц:\n"
-                            f"➕ {format_amount(income_month, currency)}\n"
-                            f"➖ {format_amount(expense_month, currency)}\n"
-                            f"{'🟢' if income_month >= expense_month else '🔴'} Баланс: {format_amount(income_month - expense_month, currency)}"
-                        )
-                        try:
-                            bot.send_message(uid, text)
-                        except Exception as e:
-                            print(f"Ошибка отправки сводки {uid}: {e}")
-        except Exception as e:
-            print(f"Ошибка daily_summary_loop: {e}")
-        time.sleep(55)
-
-threading.Thread(target=daily_summary_loop, daemon=True).start()
+    bot.send_message(call.message.chat.id, "✅ Анкета удалена.", reply_markup=kb_main(uid))
 
 # ================= FLASK =================
 
@@ -778,10 +783,9 @@ def webhook():
 
 @app.route("/", methods=["GET"])
 def index():
-    return "Bot is running!", 200
+    return "Dating bot is running!", 200
 
 if __name__ == "__main__":
     bot.remove_webhook()
     bot.set_webhook(url=f"{RENDER_URL}/webhook/{TOKEN}")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-ENDOFFILE
